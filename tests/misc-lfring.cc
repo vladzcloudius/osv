@@ -23,6 +23,7 @@
 //
 class test_spsc_ring {
 public:
+    test_spsc_ring() : _ring(4096) { }
 
     static const int max_random = 25;
     static const u64 elements_to_process = 300000000;
@@ -64,7 +65,7 @@ public:
 
 private:
 
-    ring_spsc<int, 4096> _ring;
+    ring_spsc<int> _ring;
 
     int _stats[2][max_random] = {};
 

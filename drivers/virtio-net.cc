@@ -185,7 +185,7 @@ void net::push_tx(struct mbuf* buff)
 
 void net::txq::dispatch()
 {
-    const int thresh = 16; //vqueue->size() / 16;
+    const int thresh = vqueue->size() / 2;
     while (1) {
         if (!has_pending_pkts()) {
             dispatcher_task_handle.reset(*sched::thread::current());
@@ -217,6 +217,7 @@ void net::txq::dispatch()
         if (!kicked) {
             std::cout<<"stats.tx_err="<<stats.tx_err<<std::endl;
             std::cout<<"stats.tx_drops="<<stats.tx_drops<<std::endl;
+            std::cout<<"vqueue->size()="<<vqueue->size()<<std::endl;
         }
     }
 }

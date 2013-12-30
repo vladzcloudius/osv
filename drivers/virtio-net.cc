@@ -120,31 +120,6 @@ static void if_qflush(struct ifnet *ifp)
  * @return 0 in case of success and an appropriate error code
  *         otherwise
  */
-#if 0
-static int _if_transmit(struct ifnet* ifp, struct mbuf* m_head)
-{
-    net* vnet = (net*)ifp->if_softc;
-
-    net_d("%s_start", __FUNCTION__);
-
-    /* Process packets */
-    //vnet->_tx_ring_lock.lock();
-
-    net_d("*** processing packet! ***");
-
-    int error = vnet->tx_locked(m_head);
-
-    if (!error) {
-        //vnet->kick(1);
-
-    }
-
-    //vnet->_tx_ring_lock.unlock();
-
-    return error;
-}
-#endif
-
 static int if_transmit(struct ifnet* ifp, struct mbuf* m_head)
 {
     net* vnet = (net*)ifp->if_softc;

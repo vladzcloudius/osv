@@ -111,6 +111,7 @@ static void if_qflush(struct ifnet *ifp)
     ::if_qflush(ifp);
 }
 
+
 /**
  * Transmits a single mbuf instance.
  * @param ifp upper layer instance handle
@@ -119,25 +120,105 @@ static void if_qflush(struct ifnet *ifp)
  * @return 0 in case of success and an appropriate error code
  *         otherwise
  */
-static int if_transmit(struct ifnet* ifp, struct mbuf* m_head)
+#if 0
+static int _if_transmit(struct ifnet* ifp, struct mbuf* m_head)
 {
     net* vnet = (net*)ifp->if_softc;
 
     net_d("%s_start", __FUNCTION__);
 
     /* Process packets */
-    vnet->_tx_ring_lock.lock();
+    //vnet->_tx_ring_lock.lock();
 
     net_d("*** processing packet! ***");
 
     int error = vnet->tx_locked(m_head);
 
-    if (!error)
-        vnet->kick(1);
+    if (!error) {
+        //vnet->kick(1);
 
-    vnet->_tx_ring_lock.unlock();
+    }
+
+    //vnet->_tx_ring_lock.unlock();
 
     return error;
+}
+#endif
+
+static int if_transmit(struct ifnet* ifp, struct mbuf* m_head)
+{
+    net* vnet = (net*)ifp->if_softc;
+
+    vnet->push_tx(m_head);
+
+    // TODO: Revisit
+    return 0;
+}
+
+void net::push_tx(struct mbuf* buff)
+{
+    tx_cpu_queue* local_cpuq = _txq.cpuq->get();
+
+    tx_buff_desc new_buff_desc = { buff, nanotime() };
+
+    sched::preempt_disable();
+
+    /*
+     * Start dropping if a per-CPU ring is full.
+     *
+     * TODO: Check that this shell never happen since the upper layer should
+     *       prevent it.
+     */
+    if (!local_cpuq->push(new_buff_desc)) {
+        //DEBUG_ASSERT(0, "Hmmm, no place in a per-cpu queue!");
+        assert(0);
+        sched::preempt_enable();
+        m_freem(buff);
+        return;
+    }
+
+    sched::preempt_enable();
+
+    /* Wake the dispatcher */
+    _txq.dispatcher_task_handle.wake();
+}
+
+void net::txq::dispatch()
+{
+    const int thresh = 16; //vqueue->size() / 16;
+    while (1) {
+        if (!has_pending_pkts()) {
+            dispatcher_task_handle.reset(*sched::thread::current());
+            sched::thread::wait_until(
+                [this] { return this->has_pending_pkts(); });
+            dispatcher_task_handle.clear();
+        }
+
+        bool kicked = false; /* DEBUG DEBUG */
+
+        while (mg.pop(all_cpuqs, xmit_it)) {
+            //std::cout<<"transmitting!"<<std::endl;
+            if (pkts_to_kick >= thresh) {
+                pkts_to_kick = 0;
+                vqueue->kick();
+                kicked = true;
+            }
+        }
+
+        //assert(pkts_to_kick);
+
+        if (pkts_to_kick) {
+            //std::cout<<"Kicking for "<<pkts_to_kick<<" packets"<<std::endl;
+            pkts_to_kick = 0;
+            vqueue->kick();
+            kicked = true;
+        }
+
+        if (!kicked) {
+            std::cout<<"stats.tx_err="<<stats.tx_err<<std::endl;
+            std::cout<<"stats.tx_drops="<<stats.tx_drops<<std::endl;
+        }
+    }
 }
 
 static void if_init(void* xsc)
@@ -189,9 +270,10 @@ void net::fill_qstats(const struct txq& txq,
 net::net(pci::device& dev)
     : virtio_driver(dev),
       _rxq(get_virt_queue(0), [this] { this->receiver(); }),
-      _txq(get_virt_queue(1))
+      _txq(this, get_virt_queue(1))
 {
     sched::thread* poll_task = &_rxq.poll_task;
+    sched::thread* tx_dispatcher_task = &_txq.dispatcher_task;
 
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
@@ -243,6 +325,10 @@ net::net(pci::device& dev)
     //Start the polling thread before attaching it to the Rx interrupt
     poll_task->start();
 
+    /* TODO: What if_init() is for? */
+    tx_dispatcher_task->start();
+
+
     ether_ifattach(_ifn, _config.mac);
     _msi.easy_register({
         { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
@@ -291,7 +377,6 @@ bool net::read_config()
     _guest_csum = get_guest_feature_bit(VIRTIO_NET_F_GUEST_CSUM);
     _guest_tso4 = get_guest_feature_bit(VIRTIO_NET_F_GUEST_TSO4);
     _host_tso4 = get_guest_feature_bit(VIRTIO_NET_F_HOST_TSO4);
-    _guest_ufo = get_guest_feature_bit(VIRTIO_NET_F_GUEST_UFO);
 
     net_i("Features: %s=%d,%s=%d", "Status", _status, "TSO_ECN", _tso_ecn);
     net_i("Features: %s=%d,%s=%d", "Host TSO ECN", _host_tso_ecn, "CSUM", _csum);
@@ -451,7 +536,7 @@ void net::receiver()
 
             (*_ifn->if_input)(_ifn, m_head);
 
-            trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
+            trace_virtio_net_rx_packet(_ifn->if_index, len);
 
             // The interface may have been stopped while we were
             // passing the packet up the network stack.
@@ -503,17 +588,12 @@ void net::fill_rx_ring()
         vq->kick();
 }
 
-// TODO: Does it really have to be "locked"?
-int net::tx_locked(struct mbuf *m_head, bool flush)
+int net::txq::xmit(struct mbuf *m_head)
 {
-    DEBUG_ASSERT(_tx_ring_lock.owned(), "_tx_ring_lock is not locked!");
-
     struct mbuf *m;
     net_req *req = new net_req;
-    vring* vq = _txq.vqueue;
-    auto vq_sg_vec = &vq->_sg_vec;
+    auto vq_sg_vec = &vqueue->_sg_vec;
     int rc = 0;
-    struct txq_stats* stats = &_txq.stats;
     u64 tx_bytes = 0;
 
     req->um.reset(m_head);
@@ -529,8 +609,8 @@ int net::tx_locked(struct mbuf *m_head, bool flush)
         }
     }
 
-    vq->init_sg();
-    vq->add_out_sg(static_cast<void*>(&req->mhdr), _hdr_size);
+    vqueue->init_sg();
+    vqueue->add_out_sg(static_cast<void*>(&req->mhdr), _parent->_hdr_size);
 
     for (m = m_head; m != NULL; m = m->m_hdr.mh_next) {
         int frag_len = m->m_hdr.mh_len;
@@ -539,16 +619,17 @@ int net::tx_locked(struct mbuf *m_head, bool flush)
             net_d("Frag len=%d:", frag_len);
             req->mhdr.num_buffers++;
 
-            vq->add_out_sg(m->m_hdr.mh_data, m->m_hdr.mh_len);
+            vqueue->add_out_sg(m->m_hdr.mh_data, m->m_hdr.mh_len);
             tx_bytes += frag_len;
         }
     }
 
-    if (!vq->avail_ring_has_room(vq->_sg_vec.size())) {
+    if (!vqueue->avail_ring_has_room(vqueue->_sg_vec.size())) {
         // can't call it, this is a get buf thing
-        if (vq->used_ring_not_empty()) {
-            trace_virtio_net_tx_no_space_calling_gc(_ifn->if_index);
-            tx_gc();
+        if (vqueue->used_ring_not_empty()) {
+            trace_virtio_net_tx_no_space_calling_gc(_parent->_ifn->if_index);
+            /* TODO: make tx_gc a txq member */
+            _parent->tx_gc();
         } else {
             net_d("%s: no room", __FUNCTION__);
             delete req;
@@ -558,44 +639,44 @@ int net::tx_locked(struct mbuf *m_head, bool flush)
         }
     }
 
-    if (!vq->add_buf(req)) {
-        trace_virtio_net_tx_failed_add_buf(_ifn->if_index);
+    if (!vqueue->add_buf(req)) {
+        trace_virtio_net_tx_failed_add_buf(_parent->_ifn->if_index);
         delete req;
 
         rc = ENOBUFS;
         goto out;
     }
 
-    trace_virtio_net_tx_packet(_ifn->if_index, vq_sg_vec->size());
+    trace_virtio_net_tx_packet(_parent->_ifn->if_index, vq_sg_vec->size());
 
 out:
 
     /* Update the statistics */
     switch (rc) {
     case 0: /* success */
-        stats->tx_bytes += tx_bytes;
-        stats->tx_packets++;
+        stats.tx_bytes += tx_bytes;
+        stats.tx_packets++;
 
         if (req->mhdr.hdr.flags & net_hdr::VIRTIO_NET_HDR_F_NEEDS_CSUM)
-            stats->tx_csum++;
+            stats.tx_csum++;
 
         if (req->mhdr.hdr.gso_type)
-            stats->tx_tso++;
+            stats.tx_tso++;
 
         break;
     case ENOBUFS:
-        stats->tx_drops++;
+        stats.tx_drops++;
 
         break;
     default:
-        stats->tx_err++;
+        stats.tx_err++;
     }
 
     return rc;
 }
 
 struct mbuf*
-net::tx_offload(struct mbuf* m, struct net_hdr* hdr)
+net::txq::tx_offload(struct mbuf* m, struct net_hdr* hdr)
 {
     struct ether_header *eh;
     struct ether_vlan_header *evh;
@@ -663,7 +744,7 @@ net::tx_offload(struct mbuf* m, struct net_hdr* hdr)
         hdr->gso_size = m->M_dat.MH.MH_pkthdr.tso_segsz;
 
         if (tcp->th_flags & TH_CWR) {
-            if (!_tso_ecn) {
+            if (!_parent->_tso_ecn) {
                 virtio_w("TSO with ECN not supported by host\n");
                 m_freem(m);
                 return nullptr;
@@ -704,9 +785,8 @@ u32 net::get_driver_features(void)
                  | (1 << VIRTIO_NET_F_GUEST_TSO4) \
                  | (1 << VIRTIO_NET_F_HOST_ECN)   \
                  | (1 << VIRTIO_NET_F_HOST_TSO4)  \
-                 | (1 << VIRTIO_NET_F_GUEST_ECN)
-                 | (1 << VIRTIO_NET_F_GUEST_UFO)
-            );
+                 | (1 << VIRTIO_NET_F_GUEST_ECN)  \
+                 | (1 << VIRTIO_RING_F_INDIRECT_DESC));
 }
 
 hw_driver* net::probe(hw_device* dev)
@@ -714,5 +794,5 @@ hw_driver* net::probe(hw_device* dev)
     return virtio::probe<net, VIRTIO_NET_DEVICE_ID>(dev);
 }
 
-}
+} // namespace virtio
 

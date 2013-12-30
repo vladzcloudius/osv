@@ -15,6 +15,9 @@
 
 #include "drivers/virtio.hh"
 #include "drivers/pci-device.hh"
+#include "osv/percpu.hh"
+#include "lockfree/ring.hh"
+#include "nway_merger.hh"
 
 namespace virtio {
 
@@ -23,6 +26,8 @@ namespace virtio {
  */
 class net : public virtio_driver {
 public:
+
+    friend struct txq;
 
     // The feature bitmap for virtio net
     enum NetFeatures {
@@ -214,18 +219,6 @@ public:
     void receiver();
     void fill_rx_ring();
 
-    /**
-     * Transmit a single mbuf.
-     * @param m_head a buffer to transmits
-     * @param flush kick() if TRUE
-     * @note should be called under the _tx_ring_lock.
-     *
-     * @return 0 in case of success and an appropriate error code
-     *         otherwise
-     */
-    int tx_locked(struct mbuf* m_head, bool flush = false);
-
-    struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
     void kick(int queue) {_queues[queue]->kick();}
     void tx_gc();
     static hw_driver* probe(hw_device* dev);
@@ -237,8 +230,10 @@ public:
      */
     void fill_stats(struct if_data* out_data) const;
 
+    void push_tx(struct mbuf* buff);
+
     // tx ring lock protects this ring for multiple access
-    mutex _tx_ring_lock;
+    //mutex _tx_ring_lock;
 
 private:
 
@@ -255,6 +250,8 @@ private:
 
     std::string _driver_name;
     net_config _config;
+
+    /* TODO: Consider moving all these to txq */
     bool _mergeable_bufs;
     bool _tso_ecn = false;
     bool _status = false;
@@ -263,7 +260,6 @@ private:
     bool _guest_csum = false;
     bool _guest_tso4 = false;
     bool _host_tso4 = false;
-    bool _guest_ufo = false;
 
     u32 _hdr_size;
 
@@ -294,11 +290,128 @@ private:
         struct rxq_stats stats = { 0 };
     };
 
-    /* Single Tx queue object */
+    /* optionally: use std::pair */
+    struct tx_buff_desc {
+        mbuf* buf;
+        s64 ts;
+
+        bool operator>(const tx_buff_desc& other) const
+        {
+            return ts - other.ts > 0;
+        }
+    };
+
+    class tx_cpu_queue {
+    public:
+        typedef tx_buff_desc T;
+
+        class tx_queue_iterator {
+        public:
+
+            T& operator *() const { return _r->_r.front(); }
+
+        private:
+            friend class tx_cpu_queue;
+            explicit tx_queue_iterator(tx_cpu_queue* r) : _r(r) { }
+            tx_cpu_queue* _r;
+        };
+
+        typedef tx_queue_iterator      iterator;
+
+        explicit tx_cpu_queue(unsigned sz) : _r(sz) { }
+
+        T& front() { return _r.front(); }
+        iterator begin() { return iterator(this); }
+
+        bool push(T v) { return _r.push(v); }
+
+        void erase(iterator &it) {
+            T tmp;
+            _r.pop(tmp);
+        }
+
+        bool empty() const { return _r.empty(); }
+
+    private:
+        ring_spsc<tx_buff_desc> _r;
+    };
+
+    struct txq;
+    class tx_xmit_iterator {
+    public:
+        tx_xmit_iterator(txq* txq) : _q(txq) { }
+
+        // These ones will do nothing
+        tx_xmit_iterator& operator *() { return *this; }
+        tx_xmit_iterator& operator++() { return *this; }
+
+        /**
+         * Push the packet downstream
+         * @param tx_desc
+         */
+        void operator=(const tx_buff_desc& tx_desc) {
+            //std::cout<<"Sending packet with ts "<<tx_desc.ts<<std::endl;
+            int error = _q->xmit(tx_desc.buf);
+
+            if (!error) {
+                _q->pkts_to_kick++;
+            }
+        }
+    private:
+        txq* _q;
+    };
+
+    /* Single Tx queue object TODO: Make it a class */
     struct txq {
-        txq(vring* vq) : vqueue(vq) {};
+        txq(net* parent, vring* vq) :
+            vqueue(vq), dispatcher_task([this] { this->dispatch(); }),
+            xmit_it(this), _parent(parent)
+        {
+            for (auto c : sched::cpus) {
+                cpuq.for_cpu(c)->
+                    reset(new tx_cpu_queue(vqueue->size()));
+
+                // Create a collection of per-CPU queues we are going to use for
+                // work with nway_merger class
+                all_cpuqs.push_back(cpuq.for_cpu(c)->get());
+            }
+        };
+
+        /* TODO: deplete the per-cpu rings in ~txq() and in if_qflush() */
+
         vring* vqueue;
         struct txq_stats stats = { 0 };
+        dynamic_percpu<std::unique_ptr<tx_cpu_queue> > cpuq;
+
+        sched::thread dispatcher_task;
+        sched::thread_handle dispatcher_task_handle;
+        std::list<tx_cpu_queue*> all_cpuqs;
+        osv::nway_merger<decltype(all_cpuqs)> mg;
+        void dispatch();
+        tx_xmit_iterator xmit_it;
+        int pkts_to_kick = 0;
+
+        /**
+         * Transmit a single mbuf.
+         * @param m_head a buffer to transmits
+         *
+         * @return 0 in case of success and an appropriate error code
+         *         otherwise
+         */
+        int xmit(struct mbuf *m_head);
+        struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
+        bool has_pending_pkts() {
+            for (auto c : sched::cpus) {
+                if (!cpuq.for_cpu(c)->get()->empty()) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+    private:
+        net* _parent;
     };
 
     /**

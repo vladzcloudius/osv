@@ -24,6 +24,7 @@ using sched::thread;
 TRACEPOINT(trace_virtio_enable_interrupts, "vring=%p", void *);
 TRACEPOINT(trace_virtio_disable_interrupts, "vring=%p", void *);
 TRACEPOINT(trace_virtio_kick, "queue=%d", u16);
+TRACEPOINT(trace_virtio_add_buf, "queue=%d, avail=%d", u16, u16);
 
 namespace virtio {
 
@@ -108,6 +109,8 @@ namespace virtio {
     vring::add_buf(void* cookie) {
 
             get_buf_gc();
+
+            trace_virtio_add_buf(_q_index, _avail_count);
 
             int desc_needed = _sg_vec.size();
             bool indirect = false;
@@ -284,6 +287,19 @@ namespace virtio {
             _avail_added_since_kick = 0;
         }
         return kicked;
+    }
+
+    void
+    vring::add_buf_wait(void* cookie)
+    {
+        while (!add_buf(cookie)) {
+            _waiter.reset(*sched::thread::current());
+            while (!avail_ring_has_room(_sg_vec.size())) {
+                sched::thread::wait_until([this] {return this->used_ring_can_gc();});
+                get_buf_gc();
+            }
+            _waiter.clear();
+        }
     }
 
 };

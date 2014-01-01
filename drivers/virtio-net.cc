@@ -160,7 +160,6 @@ void net::push_tx(struct mbuf* buff)
 
 void net::txq::dispatch()
 {
-    const int thresh = vqueue->size() / 2;
     while (1) {
         if (!has_pending_pkts()) {
             dispatcher_task_handle.reset(*sched::thread::current());
@@ -169,16 +168,11 @@ void net::txq::dispatch()
             dispatcher_task_handle.clear();
         }
 
-        bool kicked = false; /* DEBUG DEBUG */
-
         while (mg.pop(all_cpuqs, xmit_it)) {
             //std::cout<<"transmitting!"<<std::endl;
-            if (pkts_to_kick >= thresh) {
-                pkts_to_kick = 0;
-                vqueue->kick();
-                kicked = true;
-            }
         }
+
+        /* TODO: Wake the per-CPU waiters here */
 
         //assert(pkts_to_kick);
 
@@ -186,10 +180,7 @@ void net::txq::dispatch()
             //std::cout<<"Kicking for "<<pkts_to_kick<<" packets"<<std::endl;
             pkts_to_kick = 0;
             vqueue->kick();
-            kicked = true;
-        }
-
-        if (!kicked) {
+        } else {
             std::cout<<"stats.tx_err="<<stats.tx_err<<std::endl;
             std::cout<<"stats.tx_drops="<<stats.tx_drops<<std::endl;
             std::cout<<"vqueue->size()="<<vqueue->size()<<std::endl;

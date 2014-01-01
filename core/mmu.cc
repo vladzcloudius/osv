@@ -304,43 +304,49 @@ public:
 };
 
 template<typename PageOp, int ParentLevel> class map_level;
-template<typename PageOp> struct map_level<PageOp, -1>
+template<typename PageOp> class map_level<PageOp, -1>
 {
-    map_level(uintptr_t vstart, size_t size, PageOp page_mapper, size_t slop) {}
-    void operator()(hw_ptep parent, uintptr_t base_virt, uintptr_t offset) {
+private:
+    friend class map_level<PageOp, 0>;
+    map_level(uintptr_t vcur, size_t size, PageOp page_mapper, size_t slop) {}
+    void operator()(hw_ptep parent, uintptr_t base_virt, uintptr_t vstart) {
         assert(0);
     }
 };
 
-typedef std::integral_constant<int, 4> max_level;
-
-template<typename PageOp, typename ParentLevel = max_level>
-        void map_range(uintptr_t vstart, size_t size, PageOp& page_mapper, size_t slop = page_size,
-        hw_ptep ptep = hw_ptep::force(&page_table_root), ParentLevel level = max_level(),
-        uintptr_t base_virt = 0, uintptr_t offset = 0)
+template<typename PageOp>
+        void map_range(uintptr_t vstart, size_t size, PageOp& page_mapper, size_t slop = page_size)
 {
-    map_level<PageOp, ParentLevel::value> pt_mapper(vstart, size, page_mapper, slop);
-    pt_mapper(ptep, base_virt, offset);
+    map_level<PageOp, 4> pt_mapper(vstart, size, page_mapper, slop);
+    pt_mapper(hw_ptep::force(&page_table_root), 0, vstart);
 }
 
-template<typename PageOp, int ParentLevel = 4> class map_level {
+template<typename PageOp, int ParentLevel> class map_level {
 private:
-    uintptr_t vstart;
+    uintptr_t vcur;
     uintptr_t vend;
     size_t slop;
     PageOp& page_mapper;
-    typedef std::integral_constant<int, ParentLevel - 1> level;
+    static constexpr int level = ParentLevel - 1;
 
+    friend void map_range<PageOp>(uintptr_t, size_t, PageOp&, size_t);
+    friend class map_level<PageOp, ParentLevel + 1>;
+
+    map_level(uintptr_t vcur, size_t size, PageOp& page_mapper, size_t slop) :
+        vcur(vcur), vend(vcur + size - 1), slop(slop), page_mapper(page_mapper) {}
     bool skip_pte(hw_ptep ptep) {
         return page_mapper.skip_empty() && ptep.read().empty();
     }
     bool descend(hw_ptep ptep) {
         return page_mapper.descend() && !ptep.read().empty() && !ptep.read().large();
     }
-public:
-    map_level(uintptr_t vstart, size_t size, PageOp& page_mapper, size_t slop = page_size) :
-        vstart(vstart), vend(vstart + size - 1), slop(slop), page_mapper(page_mapper) {}
-    void operator()(hw_ptep parent, uintptr_t base_virt = 0, uintptr_t offset = 0) {
+    void map_range(uintptr_t vcur, size_t size, PageOp& page_mapper, size_t slop,
+            hw_ptep ptep, uintptr_t base_virt, uintptr_t vstart)
+    {
+        map_level<PageOp, level> pt_mapper(vcur, size, page_mapper, slop);
+        pt_mapper(ptep, base_virt, vstart);
+    }
+    void operator()(hw_ptep parent, uintptr_t base_virt = 0, uintptr_t vstart = 0) {
         if (!parent.read().present()) {
             if (!page_mapper.allocate_intermediate()) {
                 return;
@@ -357,27 +363,27 @@ public:
                 split_large_page(parent, ParentLevel);
             } else {
                 // If page_mapper does not want to split, let it handle subpage by itself
-                page_mapper.sub_page(parent, ParentLevel, offset);
+                page_mapper.sub_page(parent, ParentLevel, base_virt - vstart);
                 return;
             }
         }
         hw_ptep pt = follow(parent.read());
-        phys step = phys(1) << (page_size_shift + level::value * pte_per_page_shift);
-        auto idx = pt_index(vstart, level::value);
-        auto eidx = pt_index(vend, level::value);
+        phys step = phys(1) << (page_size_shift + level * pte_per_page_shift);
+        auto idx = pt_index(vcur, level);
+        auto eidx = pt_index(vend, level);
         base_virt += idx * step;
         base_virt = (int64_t(base_virt) << 16) >> 16; // extend 47th bit
 
         do {
             hw_ptep ptep = pt.at(idx);
-            uintptr_t vstart1 = vstart, vend1 = vend;
+            uintptr_t vstart1 = vcur, vend1 = vend;
             clamp(vstart1, vend1, base_virt, base_virt + step - 1, slop);
-            if (level::value < nr_page_sizes && vstart1 == base_virt && vend1 == base_virt + step - 1) {
-                if (level::value) {
+            if (level < nr_page_sizes && vstart1 == base_virt && vend1 == base_virt + step - 1) {
+                uintptr_t offset = base_virt - vstart;
+                if (level) {
                     if (!skip_pte(ptep)) {
                         if (descend(ptep) || !page_mapper.huge_page(ptep, offset)) {
-                            map_range(vstart1, vend1 - vstart1 + 1, page_mapper, slop, ptep,
-                                    level(), base_virt, offset);
+                            map_range(vstart1, vend1 - vstart1 + 1, page_mapper, slop, ptep, base_virt, vstart);
                             page_mapper.intermediate_page_post(ptep, offset);
                         }
                     }
@@ -387,11 +393,9 @@ public:
                     }
                 }
             } else {
-                map_range(vstart1, vend1 - vstart1 + 1, page_mapper, slop, ptep,
-                        level(), base_virt, offset);
+                map_range(vstart1, vend1 - vstart1 + 1, page_mapper, slop, ptep, base_virt, vstart);
             }
             base_virt += step;
-            offset += step;
             ++idx;
         } while(!page_mapper.once() && idx <= eidx);
     }
@@ -599,12 +603,11 @@ bool contains(uintptr_t start, uintptr_t end, vma& y)
  *
  * \return returns EACCESS/EPERM if requested permission cannot be granted
  */
-error protect(void *addr, size_t size, unsigned int perm)
+static error protect(void *addr, size_t size, unsigned int perm)
 {
     uintptr_t start = reinterpret_cast<uintptr_t>(addr);
     uintptr_t end = start + size;
     addr_range r(start, end);
-    std::lock_guard<mutex> guard(vma_list_mutex);
     auto range = vma_list.equal_range(r, vma::addr_compare());
     for (auto i = range.first; i != range.second; ++i) {
         if (i->perm() == perm)
@@ -656,7 +659,6 @@ uintptr_t find_hole(uintptr_t start, uintptr_t size)
 void evacuate(uintptr_t start, uintptr_t end)
 {
     addr_range r(start, end);
-    std::lock_guard<mutex> guard(vma_list_mutex);
     auto range = vma_list.equal_range(r, vma::addr_compare());
     for (auto i = range.first; i != range.second; ++i) {
         i->split(end);
@@ -671,27 +673,25 @@ void evacuate(uintptr_t start, uintptr_t end)
     // FIXME: range also indicates where we can insert a new anon_vma, use it
 }
 
-void unmap(void* addr, size_t size)
+static void unmap(void* addr, size_t size)
 {
     size = align_up(size, mmu::page_size);
     auto start = reinterpret_cast<uintptr_t>(addr);
     evacuate(start, start+size);
 }
 
-error msync(void* addr, size_t length, int flags)
+static error sync(void* addr, size_t length, int flags)
 {
     length = align_up(length, mmu::page_size);
     auto start = reinterpret_cast<uintptr_t>(addr);
     auto end = start+length;
     auto err = make_error(ENOMEM);
     addr_range r(start, end);
-    WITH_LOCK(vma_list_mutex) {
-        auto range = vma_list.equal_range(r, vma::addr_compare());
-        for (auto i = range.first; i != range.second; ++i) {
-            err = i->sync(start, end);
-            if (err.bad()) {
-                break;
-            }
+    auto range = vma_list.equal_range(r, vma::addr_compare());
+    for (auto i = range.first; i != range.second; ++i) {
+        err = i->sync(start, end);
+        if (err.bad()) {
+            break;
         }
     }
     return err;
@@ -802,8 +802,6 @@ bool ismapped(void *addr, size_t size)
     uintptr_t start = (uintptr_t) addr;
     uintptr_t end = start + size;
     addr_range r(start, end);
-
-    std::lock_guard<mutex> guard(vma_list_mutex);
 
     auto range = vma_list.equal_range(r, vma::addr_compare());
     for (auto p = range.first; p != range.second; ++p) {
@@ -1054,6 +1052,57 @@ void free_initial_memory_range(uintptr_t addr, size_t size)
 void switch_to_runtime_page_table()
 {
     processor::write_cr3(page_table_root.next_pt_addr());
+}
+
+error mprotect(void *addr, size_t len, unsigned perm)
+{
+    std::lock_guard<mutex> guard(vma_list_mutex);
+
+    if (!ismapped(addr, len)) {
+        return make_error(ENOMEM);
+    }
+
+    return protect(addr, len, perm);
+}
+
+error munmap(void *addr, size_t length)
+{
+    std::lock_guard<mutex> guard(vma_list_mutex);
+
+    if (!ismapped(addr, length)) {
+        return make_error(EINVAL);
+    }
+    sync(addr, length, 0);
+    unmap(addr, length);
+    return no_error();
+}
+
+error msync(void* addr, size_t length, int flags)
+{
+    std::lock_guard<mutex> guard(vma_list_mutex);
+
+    if (!ismapped(addr, length)) {
+        return make_error(ENOMEM);
+    }
+    return sync(addr, length, flags);
+}
+
+error mincore(void *addr, size_t length, unsigned char *vec)
+{
+    char *end = ::align_up((char *)addr + length, page_size);
+    char tmp;
+    std::lock_guard<mutex> guard(vma_list_mutex);
+    if (!is_linear_mapped(addr, length) && !ismapped(addr, length)) {
+        return make_error(ENOMEM);
+    }
+    for (char *p = (char *)addr; p < end; p += page_size) {
+        if (safe_load(p, tmp)) {
+            *vec++ = 0x01;
+        } else {
+            *vec++ = 0x00;
+        }
+    }
+    return no_error();
 }
 
 }

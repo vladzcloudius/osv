@@ -17,6 +17,7 @@
 
 #include <queue>
 #include <vector>
+#include <list>
 
 namespace osv {
 
@@ -138,9 +139,9 @@ public:
      *         to pop (all input sequences were empty).
      */
     template <class OutputIt>
-    bool pop(const C& sorted_lists, OutputIt res)
+    bool pop(OutputIt res)
     {
-        create_heap(sorted_lists);
+        refill_heap();
 
         if (!_heads_heap.empty()) {
             SPtr t = _heads_heap.top();
@@ -154,13 +155,18 @@ public:
             /* Erase the "HEAD" */
             t->erase(t_it);
 
+            if (!t->empty()) {
+                _heads_heap.push(t);
+            } else {
+                _empty_lists.emplace_back(t);
+            }
+
             return true;
         } else {
             return false;
         }
     }
 
-private:
     void clear() { _heads_heap = heap_type(); }
 
     /**
@@ -168,12 +174,36 @@ private:
      * @param sorted_lists
      */
     void create_heap(const C& sorted_lists) {
+
         clear();
 
         /* Create a heap */
         for (SPtr c : sorted_lists) {
             if (!c->empty()) {
                 _heads_heap.emplace(c);
+            } else {
+                _empty_lists.emplace_back(c);
+            }
+        }
+    }
+
+private:
+
+    /**
+     * Push back all sequences from the _empty_list back to the heap
+     */
+    void refill_heap() {
+        auto it = _empty_lists.begin();
+        while (it != _empty_lists.end()) {
+            if (!(*it)->empty()) {
+                _heads_heap.emplace(*it);
+
+                auto tmp_it = it;
+                ++it;
+
+                _empty_lists.erase(tmp_it);
+            } else {
+                ++it;
             }
         }
     }
@@ -182,6 +212,8 @@ private:
     typedef std::priority_queue<SPtr, std::vector<SPtr>, Comp> heap_type;
 
     heap_type _heads_heap;
+    C* _sorted_lists;
+    std::list<SPtr> _empty_lists;
 };
 
 } /* namespace osv */

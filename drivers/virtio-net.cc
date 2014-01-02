@@ -191,6 +191,8 @@ void net::txq::bh_func()
 
 void net::txq::dispatch()
 {
+    mg.create_heap(all_cpuqs);
+
     while (1) {
         if (!has_pending_pkts()) {
             new_work_hdl.reset(*sched::thread::current());
@@ -199,7 +201,7 @@ void net::txq::dispatch()
             new_work_hdl.clear();
         }
 
-        while (mg.pop(all_cpuqs, xmit_it)) {
+        while (mg.pop(xmit_it)) {
             //std::cout<<"transmitting!"<<std::endl;
         }
 

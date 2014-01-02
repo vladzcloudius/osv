@@ -155,17 +155,48 @@ void net::push_tx(struct mbuf* buff)
     sched::preempt_enable();
 
     /* Wake the dispatcher */
-    _txq.dispatcher_task_handle.wake();
+    _txq.new_work_hdl.wake();
+}
+
+void net::txq::kick()
+{
+    if (pkts_to_kick) {
+        pkts_to_kick = 0;
+        vqueue->kick();
+    }
+}
+
+void net::txq::bh_func()
+{
+    vring* vq = vqueue;
+    net_req* req;
+    u32 len;
+
+    while (1) {
+        _parent->virtio_driver::wait_for_queue(vq, &vring::used_ring_not_empty);
+
+        req = static_cast<net_req*>(vq->get_buf_elem(&len));
+
+        while(req != nullptr) {
+            delete req;
+            // This will advance _used_ring_host_head
+            vq->get_buf_finalize();
+
+            req = static_cast<net_req*>(vq->get_buf_elem(&len));
+        }
+
+        vqueue->wakeup_waiter();
+    }
 }
 
 void net::txq::dispatch()
 {
     while (1) {
         if (!has_pending_pkts()) {
-            dispatcher_task_handle.reset(*sched::thread::current());
+            new_work_hdl.reset(*sched::thread::current());
             sched::thread::wait_until(
                 [this] { return this->has_pending_pkts(); });
-            dispatcher_task_handle.clear();
+            new_work_hdl.clear();
         }
 
         while (mg.pop(all_cpuqs, xmit_it)) {
@@ -174,16 +205,10 @@ void net::txq::dispatch()
 
         /* TODO: Wake the per-CPU waiters here */
 
-        //assert(pkts_to_kick);
+        assert(pkts_to_kick);
 
         if (pkts_to_kick) {
-            //std::cout<<"Kicking for "<<pkts_to_kick<<" packets"<<std::endl;
-            pkts_to_kick = 0;
-            vqueue->kick();
-        } else {
-            std::cout<<"stats.tx_err="<<stats.tx_err<<std::endl;
-            std::cout<<"stats.tx_drops="<<stats.tx_drops<<std::endl;
-            std::cout<<"vqueue->size()="<<vqueue->size()<<std::endl;
+            kick();
         }
     }
 }
@@ -241,6 +266,7 @@ net::net(pci::device& dev)
 {
     sched::thread* poll_task = &_rxq.poll_task;
     sched::thread* tx_dispatcher_task = &_txq.dispatcher_task;
+    sched::thread* bh_task = &_txq.bh_task;
 
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
@@ -294,12 +320,13 @@ net::net(pci::device& dev)
 
     /* TODO: What if_init() is for? */
     tx_dispatcher_task->start();
+    bh_task->start();
 
 
     ether_ifattach(_ifn, _config.mac);
     _msi.easy_register({
         { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
-        { 1, [&] { _txq.vqueue->disable_interrupts(); }, nullptr }
+        { 1, [&] { _txq.vqueue->disable_interrupts(); }, bh_task }
     });
 
     fill_rx_ring();
@@ -555,7 +582,7 @@ void net::fill_rx_ring()
         vq->kick();
 }
 
-int net::txq::xmit(struct mbuf *m_head)
+int net::txq::xmit(mbuf* m_head)
 {
     struct mbuf *m;
     net_req *req = new net_req;
@@ -591,27 +618,11 @@ int net::txq::xmit(struct mbuf *m_head)
         }
     }
 
-    if (!vqueue->avail_ring_has_room(vqueue->_sg_vec.size())) {
-        // can't call it, this is a get buf thing
-        if (vqueue->used_ring_not_empty()) {
-            trace_virtio_net_tx_no_space_calling_gc(_parent->_ifn->if_index);
-            /* TODO: make tx_gc a txq member */
-            _parent->tx_gc();
-        } else {
-            net_d("%s: no room", __FUNCTION__);
-            delete req;
-
-            rc = ENOBUFS;
-            goto out;
-        }
-    }
-
     if (!vqueue->add_buf(req)) {
-        trace_virtio_net_tx_failed_add_buf(_parent->_ifn->if_index);
-        delete req;
+        // Kick the pending work - we are about to sleep
+        kick();
 
-        rc = ENOBUFS;
-        goto out;
+        vqueue->add_buf_wait(req);
     }
 
     trace_virtio_net_tx_packet(_parent->_ifn->if_index, vq_sg_vec->size());
@@ -630,10 +641,9 @@ out:
         if (req->mhdr.hdr.gso_type)
             stats.tx_tso++;
 
-        break;
-    case ENOBUFS:
-        stats.tx_drops++;
-
+        // It was a good packet - increase the counter of a "pending for a kick"
+        // packets.
+        pkts_to_kick++;
         break;
     default:
         stats.tx_err++;
@@ -722,23 +732,6 @@ net::txq::tx_offload(struct mbuf* m, struct net_hdr* hdr)
     }
 
     return m;
-}
-
-void net::tx_gc()
-{
-    net_req * req;
-    u32 len;
-    vring* vq = _txq.vqueue;
-
-    req = static_cast<net_req*>(vq->get_buf_elem(&len));
-
-    while(req != nullptr) {
-        delete req;
-        vq->get_buf_finalize();
-
-        req = static_cast<net_req*>(vq->get_buf_elem(&len));
-    }
-    vq->get_buf_gc();
 }
 
 u32 net::get_driver_features(void)

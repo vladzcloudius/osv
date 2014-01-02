@@ -220,7 +220,6 @@ public:
     void fill_rx_ring();
 
     void kick(int queue) {_queues[queue]->kick();}
-    void tx_gc();
     static hw_driver* probe(hw_device* dev);
 
     /**
@@ -353,8 +352,9 @@ private:
             //std::cout<<"Sending packet with ts "<<tx_desc.ts<<std::endl;
             int error = _q->xmit(tx_desc.buf);
 
-            if (!error) {
-                _q->pkts_to_kick++;
+            if (error) {
+                // Hmmm... Bad packet?!
+                assert(0);
             }
         }
     private:
@@ -364,7 +364,9 @@ private:
     /* Single Tx queue object TODO: Make it a class */
     struct txq {
         txq(net* parent, vring* vq) :
-            vqueue(vq), dispatcher_task([this] { this->dispatch(); }),
+            vqueue(vq),
+            dispatcher_task([this] { this->dispatch(); }),
+            bh_task([this] { this->bh_func(); }),
             xmit_it(this), _parent(parent)
         {
             for (auto c : sched::cpus) {
@@ -383,11 +385,10 @@ private:
         struct txq_stats stats = { 0 };
         dynamic_percpu<std::unique_ptr<tx_cpu_queue> > cpuq;
 
-        sched::thread dispatcher_task;
-        sched::thread_handle dispatcher_task_handle;
+        sched::thread dispatcher_task , bh_task;
+        sched::thread_handle new_work_hdl;
         std::list<tx_cpu_queue*> all_cpuqs;
         osv::nway_merger<decltype(all_cpuqs)> mg;
-        void dispatch();
         tx_xmit_iterator xmit_it;
         int pkts_to_kick = 0;
 
@@ -409,8 +410,11 @@ private:
 
             return false;
         }
-
     private:
+        void dispatch();
+        void bh_func();
+        void kick();
+
         net* _parent;
     };
 

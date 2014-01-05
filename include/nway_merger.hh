@@ -167,6 +167,12 @@ public:
         }
     }
 
+    // TODO: Rework-rework!!! 
+    bool empty() {
+        refill_heap();
+        return _heads_heap.empty();
+    }
+
     void clear() { _heads_heap = heap_type(); }
 
     /**
@@ -187,8 +193,6 @@ public:
         }
     }
 
-private:
-
     /**
      * Push back all sequences from the _empty_list back to the heap
      */
@@ -208,6 +212,7 @@ private:
         }
     }
 
+private:
     typedef typename C::value_type                             SPtr;
     typedef std::priority_queue<SPtr, std::vector<SPtr>, Comp> heap_type;
 

@@ -124,13 +124,10 @@ static int if_transmit(struct ifnet* ifp, struct mbuf* m_head)
 {
     net* vnet = (net*)ifp->if_softc;
 
-    vnet->push_tx(m_head);
-
-    // TODO: Revisit
-    return 0;
+    return vnet->push_tx(m_head);
 }
 
-void net::push_tx(struct mbuf* buff)
+int net::push_tx(struct mbuf* buff)
 {
     tx_cpu_queue* local_cpuq = _txq.cpuq->get();
 
@@ -138,18 +135,19 @@ void net::push_tx(struct mbuf* buff)
 
     sched::preempt_disable();
 
-    /*
-     * Start dropping if a per-CPU ring is full.
-     *
-     * TODO: Check that this shell never happen since the upper layer should
-     *       prevent it.
-     */
+    //
+    // Start dropping if a per-CPU ring is full!
+    //
+    // If there is a situation when the dispatcher doesn't keep up then we need
+    // to pacify the sender anyway. Dropping the frame and informing the upper
+    // layers about what we did is the fastest and acceptible solution.
+    //
+    // We've allocated the per-CPU ring to be big enough for this not to happen.
+    //
     if (!local_cpuq->push(new_buff_desc)) {
-        //DEBUG_ASSERT(0, "Hmmm, no place in a per-cpu queue!");
-        assert(0);
         sched::preempt_enable();
         m_freem(buff);
-        return;
+        return ENOBUFS;
     }
 
     sched::preempt_enable();
@@ -167,6 +165,8 @@ void net::push_tx(struct mbuf* buff)
 #endif
     /* Wake the dispatcher */
     _txq.new_work_hdl.wake();
+
+    return 0;
 }
 
 void net::txq::kick()

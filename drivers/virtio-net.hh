@@ -229,7 +229,7 @@ public:
      */
     void fill_stats(struct if_data* out_data) const;
 
-    void push_tx(struct mbuf* buff);
+    int push_tx(struct mbuf* buff);
 
     // tx ring lock protects this ring for multiple access
     //mutex _tx_ring_lock;
@@ -363,6 +363,15 @@ private:
 
     /* Single Tx queue object TODO: Make it a class */
     struct txq {
+        /**
+         * This is the size of the buffers ring of the FreeBSD virtio-net
+         * driver. So, I'm using this as a baseline. We may ajust this value
+         * later (cut it down maybe?!).
+         *
+         * Currently this gives us ~16 pages per one CPU ring.
+         */
+        const unsigned cpu_txq_size	= 4096;
+
         txq(net* parent, vring* vq) :
             vqueue(vq),
             dispatcher_task([this] { this->dispatch(); }),
@@ -371,7 +380,7 @@ private:
         {
             for (auto c : sched::cpus) {
                 cpuq.for_cpu(c)->
-                    reset(new tx_cpu_queue(vqueue->size()));
+                    reset(new tx_cpu_queue(cpu_txq_size));
             }
         };
 

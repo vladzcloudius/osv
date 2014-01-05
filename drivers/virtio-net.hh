@@ -372,25 +372,8 @@ private:
             for (auto c : sched::cpus) {
                 cpuq.for_cpu(c)->
                     reset(new tx_cpu_queue(vqueue->size()));
-
-                // Create a collection of per-CPU queues we are going to use for
-                // work with nway_merger class
-                all_cpuqs.push_back(cpuq.for_cpu(c)->get());
             }
         };
-
-        /* TODO: deplete the per-cpu rings in ~txq() and in if_qflush() */
-
-        vring* vqueue;
-        struct txq_stats stats = { 0 };
-        dynamic_percpu<std::unique_ptr<tx_cpu_queue> > cpuq;
-
-        sched::thread dispatcher_task , bh_task;
-        sched::thread_handle new_work_hdl;
-        std::list<tx_cpu_queue*> all_cpuqs;
-        osv::nway_merger<decltype(all_cpuqs)> mg;
-        tx_xmit_iterator xmit_it;
-        int pkts_to_kick = 0;
 
         /**
          * Transmit a single mbuf.
@@ -400,21 +383,24 @@ private:
          *         otherwise
          */
         int xmit(struct mbuf *m_head);
-        struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
-        bool has_pending_pkts() {
-            for (auto c : sched::cpus) {
-                if (!cpuq.for_cpu(c)->get()->empty()) {
-                    return true;
-                }
-            }
 
-            return false;
-        }
+        /* TODO: deplete the per-cpu rings in ~txq() and in if_qflush() */
+
+        vring* vqueue;
+        struct txq_stats stats = { 0 };
+        dynamic_percpu<std::unique_ptr<tx_cpu_queue> > cpuq;
+        sched::thread dispatcher_task, bh_task;
+        sched::thread_handle new_work_hdl;
+
+        osv::nway_merger<std::list<tx_cpu_queue*> > mg;
+        tx_xmit_iterator xmit_it;
+        u16 pkts_to_kick = 0;
     private:
         void dispatch();
         void bh_func();
         void kick();
-
+        struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
+        
         net* _parent;
     };
 

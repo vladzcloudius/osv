@@ -154,6 +154,17 @@ void net::push_tx(struct mbuf* buff)
 
     sched::preempt_enable();
 
+#if 0
+    /* DEBUG DEBUG */
+    static int last_cpu_id = -1;
+
+    if ((int)sched::thread::current()->tcpu()->id != last_cpu_id) {
+        last_cpu_id = sched::thread::current()->tcpu()->id;
+        std::cout << "Pushed from CPU[" <<
+            sched::thread::current()->tcpu()->id<<"]"<<std::endl;
+    }
+    /*****************/
+#endif
     /* Wake the dispatcher */
     _txq.new_work_hdl.wake();
 }
@@ -171,47 +182,75 @@ void net::txq::bh_func()
     vring* vq = vqueue;
     net_req* req;
     u32 len;
+    u16 req_cnt;
+    //
+    // "finalize" at least every half a ring to let the host work in
+    // paralel with us.
+    //
+    const u16 fin_thr = static_cast<u16>(vqueue->size()) / 2;
 
     while (1) {
         _parent->virtio_driver::wait_for_queue(vq, &vring::used_ring_not_empty);
 
         req = static_cast<net_req*>(vq->get_buf_elem(&len));
 
-        while(req != nullptr) {
+        for (req_cnt = 0; (req != nullptr) && (req_cnt < fin_thr); req_cnt++) {
+
             delete req;
-            // This will advance _used_ring_host_head
-            vq->get_buf_finalize();
 
             req = static_cast<net_req*>(vq->get_buf_elem(&len));
         }
 
+        // TODO: when a proper ifdown() is implemented the below assert as it's
+        // now will be no longer valid.
+        
+        // We wouldn't wake up if there won't be a single used element to handle
+        DEBUG_ASSERT(req_cnt, "Hmmm... No completed packets and we are awake!");
+        vq->get_buf_finalize(req_cnt);
         vqueue->wakeup_waiter();
     }
 }
 
 void net::txq::dispatch()
 {
+    // Kick at least every full ring of packets.
+    // Othersize a deadlock is possible:
+    //   1) We post a full ring of buffers without a kick().
+    //   2) We block on posting of the next buffer.
+    //   3) HW doesn't know there is a work to do.
+    //   4) Dead lock.
+    const int kick_thresh = vqueue->size();
+
+    // Create a collection of a per-CPU queues
+    std::list<tx_cpu_queue*> all_cpuqs;
+
+    for (auto c : sched::cpus) {
+        all_cpuqs.push_back(cpuq.for_cpu(c)->get());
+    }
+
+    // Push them all into the heap
     mg.create_heap(all_cpuqs);
 
+    // Start taking packets one-by-one and send them out
     while (1) {
-        if (!has_pending_pkts()) {
+        if (!mg.pop(xmit_it)) {
             new_work_hdl.reset(*sched::thread::current());
             sched::thread::wait_until(
-                [this] { return this->has_pending_pkts(); });
+                [this] { return !mg.empty(); });
             new_work_hdl.clear();
         }
 
         while (mg.pop(xmit_it)) {
-            //std::cout<<"transmitting!"<<std::endl;
+            if (pkts_to_kick >= kick_thresh) {
+                kick();
+            }
         }
 
         /* TODO: Wake the per-CPU waiters here */
 
-        assert(pkts_to_kick);
+        //assert(pkts_to_kick);
 
-        if (pkts_to_kick) {
-            kick();
-        }
+        kick();
     }
 }
 

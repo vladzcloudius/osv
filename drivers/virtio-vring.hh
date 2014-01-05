@@ -132,7 +132,7 @@ class virtio_driver;
         // We separate that from get_buf_elem so no one
         // will re-cycle the request header location until
         // we're finished with it in the upper layer
-        void get_buf_finalize();
+        void get_buf_finalize(u16 delta = 1);
         // GC the used items that were already read to be emptied
         // within the ring. Should be called by add_buf
         // It was separated from the get_buf flow to allow parallelism of the two

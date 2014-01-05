@@ -224,10 +224,10 @@ namespace virtio {
             return cookie;
     }
 
-    void
-    vring::get_buf_finalize()
+
+    void vring::get_buf_finalize(u16 delta)
     {
-            _used_ring_host_head++;
+            _used_ring_host_head += delta;
 
             // only let the host know about our used idx in case irq are enabled
             if (_avail->interrupt_on())

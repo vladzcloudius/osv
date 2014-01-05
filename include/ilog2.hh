@@ -40,6 +40,25 @@ unsigned ilog2_roundup(T n)
     return sizeof(T)*8 - count_leading_zeros(n - 1);
 }
 
+/**
+ * @param T type of n
+ * @param n
+ *
+ * @return A position of a most significant set bit in n, indexing from 1. If
+ *         there are no set bits - returns 0.
+ */
+template <typename T>
+inline
+unsigned msb(T n)
+{
+    if (n == 0) {
+        return 0;
+    }
+
+    return sizeof(T) * 8 - count_leading_zeros(n);
+}
+
+
 template <typename T>
 inline constexpr
 bool is_power_of_two(T n)

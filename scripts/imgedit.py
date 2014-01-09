@@ -6,6 +6,8 @@ import time
 
 from nbd_client import nbd_client
 
+_devnull = open('/dev/null', 'w')
+
 cmd = sys.argv[1]
 args = sys.argv[2:]
 
@@ -50,19 +52,18 @@ class nbd_file(object):
         self._filename = filename
         self._offset = 0
         self._buf    = None
+        self._closed = True
         self._process = subprocess.Popen("qemu-nbd %s" % filename,
-                                        shell = True, stdout=subprocess.PIPE)
+                                        shell = True, stdout=_devnull)
         # wait for qemu-nbd to start: this thing doesn't tell anything on stdout
         while True:
-            succeed = True
             try:
                 self._client = nbd_client("localhost")
-            except:
-                time.sleep(0.1)
-                succeed = False
-                pass
-            if succeed:
                 break
+            except:
+                if self._process.poll() != None:
+                    raise Exception('Qemu terminated with exit code %d' % self._process.returncode)
+                time.sleep(0.1)
         self._closed = False
 
     def __del__(self):
@@ -80,7 +81,8 @@ class nbd_file(object):
         # send disconnect to nbd server
         self._client.close()
         # wait for server to exit
-        self._process.communicate()
+        if self._process.wait():
+            raise Exception('Qemu terminated with exit code %d' % self._process.returncode)
         self._closed = True
 
     def seek(self, offset):

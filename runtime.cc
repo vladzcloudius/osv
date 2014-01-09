@@ -51,6 +51,7 @@
 #include "drivers/pvpanic.hh"
 #include <api/sys/resource.h>
 #include <api/math.h>
+#include <osv/shutdown.hh>
 
 #define __LC_LAST 13
 
@@ -304,7 +305,7 @@ int pclose(FILE *stream)
 void exit(int status)
 {
     debug(fmt("program exited with status %d\n") % status);
-    osv::poweroff();
+    osv::shutdown();
 }
 
 int atexit(void (*func)())
@@ -328,6 +329,7 @@ static int prio_find_thread(sched::thread **th, int which, int id)
 {
     errno = 0;
     if ((which == PRIO_USER) || (which == PRIO_PGRP)) {
+        *th = nullptr;
         return 0;
     }
 

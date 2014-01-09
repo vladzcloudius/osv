@@ -155,6 +155,7 @@ boost-tests := tests/tst-rename.so \
 	tests/misc-fs-stress.so \
 	tests/misc-bdev-write.so \
 	tests/tst-promise.so \
+	tests/tst-dlfcn.so \
 	tests/tst-stat.so
 
 java_tests := tests/hello/Hello.class
@@ -209,6 +210,7 @@ tests += tests/tst-commands.so
 tests += tests/tst-threadcomplete.so
 tests += tests/tst-timerfd.so
 tests += tests/tst-nway-merger.so
+tests += tests/tst-memmove.so
 
 tests/hello/Hello.class: javabase=tests/hello
 
@@ -556,7 +558,7 @@ objects += arch/x64/entry-xen.o
 objects += arch/x64/xen.o
 objects += arch/x64/backtrace.o
 objects += arch/x64/xen_intr.o
-objects += core/mutex.o
+objects += core/spinlock.o
 objects += core/lfmutex.o
 objects += core/rwlock.o
 objects += core/semaphore.o
@@ -584,6 +586,7 @@ objects += core/per-cpu-counter.o
 objects += core/percpu-worker.o
 objects += core/dhcp.o
 objects += core/run.o
+objects += core/shutdown.o
 
 include $(src)/fs/build.mk
 include $(src)/libc/build.mk
@@ -656,7 +659,11 @@ usr.img: bare.img $(out)/usr.manifest $(out)/cmdline
 
 $(jni): INCLUDES += -I /usr/lib/jvm/java/include -I /usr/lib/jvm/java/include/linux/
 
+<<<<<<< HEAD
 bootfs.bin: scripts/mkbootfs.py $(out)/bootfs.manifest $(tests) $(tools) $(java_tests) \
+=======
+bootfs.bin: scripts/mkbootfs.py $(out)/bootfs.manifest $(tests) $(java_tests) $(tools) \
+>>>>>>> master
 		tests/testrunner.so java/java.so java/runjava.jar \
 		zpool.so zfs.so
 	$(call quiet, $(src)/scripts/mkbootfs.py -o $@ -d $@.d -m $(out)/bootfs.manifest \
@@ -709,7 +716,7 @@ $(out)/test.manifest.gen: $(src)/build.mk
 .PHONY: process-modules
 process-modules: bootfs.manifest.skel usr.manifest.skel $(out)/test.manifest.gen
 	cd $(out)/module \
-	  && OSV_BASE=$(src) OSV_BUILD_PATH=$(out) $(src)/scripts/module.py --image-config $(image)
+	  && jdkbase=$(jdkbase) OSV_BASE=$(src) OSV_BUILD_PATH=$(out) $(src)/scripts/module.py --image-config $(image)
 
 $(out)/cmdline: process-modules
 $(out)/bootfs.manifest: process-modules

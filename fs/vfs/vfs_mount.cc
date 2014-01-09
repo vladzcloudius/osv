@@ -138,6 +138,7 @@ sys_mount(char *dev, char *dir, char *fsname, int flags, void *data)
     mp->m_op = fs->vs_op;
     mp->m_flags = flags;
     mp->m_dev = device;
+    mp->m_data = NULL;
     strlcpy(mp->m_path, dir, sizeof(mp->m_path));
     strlcpy(mp->m_special, dev, sizeof(mp->m_special));
 
@@ -172,7 +173,7 @@ sys_mount(char *dev, char *dir, char *fsname, int flags, void *data)
     vp->v_flags = VROOT;
     vp->v_mode = S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR;
 
-    mp->m_root = dentry_alloc(vp, "/");
+    mp->m_root = dentry_alloc(NULL, vp, "/");
     if (!mp->m_root) {
         vput(vp);
         goto err3;
@@ -210,6 +211,18 @@ sys_mount(char *dev, char *dir, char *fsname, int flags, void *data)
     return error;
 }
 
+void
+release_mp_dentries(struct mount *mp)
+{
+    /* Decrement referece count of root vnode */
+    if (mp->m_covered) {
+        drele(mp->m_covered);
+    }
+
+    /* Release root dentry */
+    drele(mp->m_root);
+}
+
 int
 sys_umount2(const char *path, int flags)
 {
@@ -243,17 +256,10 @@ found:
         error = EINVAL;
         goto out;
     }
-    if ((error = VFS_UNMOUNT(mp)) != 0)
+
+    if ((error = VFS_UNMOUNT(mp, flags)) != 0)
         goto out;
     LIST_REMOVE(mp, m_link);
-
-    /* Decrement referece count of root vnode */
-    if (mp->m_covered) {
-        drele(mp->m_covered);
-    }
-
-    /* Release all vnodes */
-    vflush(mp);
 
 #ifdef HAVE_BUFFERS
     /* Flush all buffers */
@@ -300,16 +306,22 @@ sys_pivot_root(const char *new_root, const char *put_old)
                 return EBUSY;
             }
         }
-        if ((error = VFS_UNMOUNT(oldmp)) != 0) {
+        if ((error = VFS_UNMOUNT(oldmp, 0)) != 0) {
             return error;
         }
         LIST_REMOVE(oldmp, m_link);
 
         newmp->m_root->d_vnode->v_mount = newmp;
 
+        if (newmp->m_covered) {
+            drele(newmp->m_covered);
+        }
         newmp->m_covered = NULL;
 
-        vflush(oldmp);
+        if (newmp->m_root->d_parent) {
+            drele(newmp->m_root->d_parent);
+        }
+        newmp->m_root->d_parent = NULL;
 
         free(oldmp);
 

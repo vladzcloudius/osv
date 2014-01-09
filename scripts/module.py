@@ -7,7 +7,7 @@ import subprocess
 import operator
 import argparse
 import textwrap
-from osv.modules import api, resolve
+from osv.modules import api, resolve, filemap
 
 class jvm(api.basic_app):
     multimain_manifest = '/etc/javamains'
@@ -61,16 +61,27 @@ def generate_manifests(modules, basic_apps):
             append_manifest(os.path.join(resolve.get_osv_base(), "%s.skel" % manifest_name), manifest)
 
             for module in modules:
-                module_dir = resolve.get_module_dir(module)
-                module_manifest = os.path.join(module_dir, manifest_name)
-                print "Appending %s to %s" % (module_manifest, manifest_name)
-                append_manifest(module_manifest, manifest, variables={
-                        'MODULE_DIR': module_dir,
+                module_manifest = os.path.join(module.local_path, manifest_name)
+
+                if os.path.exists(module_manifest):
+                    print "Appending %s to %s" % (module_manifest, manifest_name)
+                    append_manifest(module_manifest, manifest, variables={
+                        'MODULE_DIR': module.local_path,
                         'OSV_BASE': resolve.get_osv_base()
                     })
 
+                filemap_attr = '%s_files' % manifest_type
+                if hasattr(module, filemap_attr):
+                    filemap.as_manifest(getattr(module, filemap_attr), manifest.write)
+
             for app in basic_apps:
                 app.prepare_manifest(resolve.get_build_path(), manifest_type, manifest)
+
+            # Add a generated content here
+            if manifest_type == 'usr':
+                with open(os.path.join(resolve.get_build_path(), 'test.manifest.gen')) as src_file:
+                    for line in src_file:
+                        manifest.write(line)
 
 def get_command_line(basic_apps):
     if not basic_apps:
@@ -87,8 +98,7 @@ def get_command_line(basic_apps):
 
 def make_modules(modules):
     for module in modules:
-        module_dir = resolve.get_module_dir(module)
-        subprocess.call(["make module"], shell=True, cwd=module_dir)
+        subprocess.call(["make module"], shell=True, cwd=module.local_path)
 
 def flatten_list(elememnts):
     if not elememnts:
@@ -144,11 +154,11 @@ if __name__ == "__main__":
     if not modules:
         print "  None"
     for module in modules:
-        print "  " + module["name"]
+        print "  " + module.name
 
     make_modules(modules)
 
-    run_list = getattr(config, 'run', [])
+    run_list = config.get('run', [])
     apps_to_run = get_basic_apps(run_list)
     generate_manifests(modules, apps_to_run)
     generate_cmdline(apps_to_run)

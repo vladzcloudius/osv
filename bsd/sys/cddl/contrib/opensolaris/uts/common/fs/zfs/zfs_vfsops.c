@@ -1611,11 +1611,8 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 
 /*ARGSUSED*/
 static int
-zfs_umount(vfs_t *vfsp /* , int fflag */)
+zfs_umount(vfs_t *vfsp, int fflag)
 {
-#ifdef __OSV__
-	int fflag = 0;
-#endif
 	kthread_t *td = curthread;
 	zfsvfs_t *zfsvfs = vfsp->vfs_data;
 	objset_t *os;
@@ -1674,11 +1671,14 @@ zfs_umount(vfs_t *vfsp /* , int fflag */)
 		rrw_exit(&zfsvfs->z_teardown_lock, FTAG);
 	}
 
+#ifdef __OSV__
+	release_mp_dentries(vfsp);
+#else
 	/*
 	 * Flush all the files.
 	 */
 	/* ret = */ vflush(vfsp /* , 1, (fflag & MS_FORCE) ? FORCECLOSE : 0, td */);
-#ifndef __OSV__
+
 	if (ret != 0) {
 		if (!zfsvfs->z_issnap) {
 			zfsctl_create(zfsvfs);

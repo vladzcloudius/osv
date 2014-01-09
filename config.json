@@ -4,8 +4,12 @@
             "type": "direct-dir",
             "path": "${OSV_BASE}/modules/mgmt/"
         },
-	"include": [
-	    "${OSV_BASE}/apps/modules.json"
-	]
+        "java": {
+            "type": "direct-dir",
+            "path": "${OSV_BASE}/modules/java/"
+        },
+    "include": [
+        "${OSV_BASE}/apps/modules.json"
+    ]
    }
 }

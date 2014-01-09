@@ -40,6 +40,7 @@ TRACEPOINT(trace_sched_preempt, "");
 TRACEPOINT(trace_timer_set, "timer=%p time=%d", timer_base*, s64);
 TRACEPOINT(trace_timer_cancel, "timer=%p", timer_base*);
 TRACEPOINT(trace_timer_fired, "timer=%p", timer_base*);
+TRACEPOINT(trace_thread_create, "thread=%p", thread*);
 
 std::vector<cpu*> cpus __attribute__((init_priority((int)init_prio::cpus)));
 
@@ -207,6 +208,7 @@ void cpu::reschedule_from_interrupt(bool preempt)
     const auto p_status = p->_detached_state->st.load();
     assert(p_status != thread::status::queued);
 
+    p->_total_cpu_time += interval;
     p->_runtime.ran_for(interval);
 
     if (p_status == thread::status::running) {
@@ -538,6 +540,10 @@ mutex thread_map_mutex;
 std::unordered_map<unsigned long, thread *> thread_map
     __attribute__((init_priority((int)init_prio::threadlist)));
 
+// We reserve a space in the end of the PID space, so we can reuse those
+// special purpose ids for other things. 4096 positions is arbitrary, but
+// <<should be enough for anybody>> (tm)
+constexpr unsigned int tid_max = UINT_MAX - 4096;
 unsigned long thread::_s_idgen = 0;
 
 thread *thread::find_by_id(unsigned int id)
@@ -571,13 +577,15 @@ thread::thread(std::function<void ()> func, attr attr, bool main)
     , _cleanup([this] { delete this; })
     , _joiner(nullptr)
 {
+    trace_thread_create(this);
+    setup_tcb();
     WITH_LOCK(thread_map_mutex) {
         if (!main) {
             auto ttid = _s_idgen;
             auto tid = ttid;
             do {
                 tid++;
-                if (tid > UINT_MAX) { // wrap around
+                if (tid > tid_max) { // wrap around
                     tid = 1;
                 }
                 if (!find_by_id(tid)) {
@@ -591,7 +599,6 @@ thread::thread(std::function<void ()> func, attr attr, bool main)
             }
         }
     }
-    setup_tcb();
     // setup s_current before switching to the thread, so interrupts
     // can call thread::current()
     // remote_thread_local_var() doesn't work when there is no current

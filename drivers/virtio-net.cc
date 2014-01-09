@@ -129,11 +129,14 @@ static int if_transmit(struct ifnet* ifp, struct mbuf* m_head)
 
 int net::push_tx(struct mbuf* buff)
 {
-    tx_cpu_queue* local_cpuq = _txq.cpuq->get();
-
     tx_buff_desc new_buff_desc = { buff, nanotime() };
 
     sched::preempt_disable();
+
+    tx_cpu_queue* local_cpuq = _txq.cpuq->get();
+
+    // If size if 0 or 1 we may need to wake to dispatcher
+    unsigned size_before = local_cpuq->size();
 
     //
     // Start dropping if a per-CPU ring is full!
@@ -147,24 +150,28 @@ int net::push_tx(struct mbuf* buff)
     if (!local_cpuq->push(new_buff_desc)) {
         sched::preempt_enable();
         m_freem(buff);
+        local_cpuq->tx_dropped++;
+        /*std::cout<<"["<<sched::thread::current()->tcpu()->id<<
+            "] Dropping: factor "<<
+            (double)local_cpuq->tx_dropped/local_cpuq->tx_pkts<<std::endl;*/
         return ENOBUFS;
     }
 
     sched::preempt_enable();
 
-#if 0
-    /* DEBUG DEBUG */
-    static int last_cpu_id = -1;
+    //local_cpuq->tx_pkts++;
 
-    if ((int)sched::thread::current()->tcpu()->id != last_cpu_id) {
-        last_cpu_id = sched::thread::current()->tcpu()->id;
-        std::cout << "Pushed from CPU[" <<
-            sched::thread::current()->tcpu()->id<<"]"<<std::endl;
+//    std::cout<<"Sending!!!"<<std::endl;
+
+    //
+    // Wake the dispatcher if the queue was empty or the dispatcher was
+    // handling the last packet before we added this one and if it hasn't
+    // handled the current packet so far.
+    //
+    unsigned cur_size = local_cpuq->size();
+    if ((size_before < 2) && (cur_size != 0)) {
+        _txq.new_work_hdl.wake();
     }
-    /*****************/
-#endif
-    /* Wake the dispatcher */
-    _txq.new_work_hdl.wake();
 
     return 0;
 }
@@ -174,40 +181,6 @@ void net::txq::kick()
     if (pkts_to_kick) {
         pkts_to_kick = 0;
         vqueue->kick();
-    }
-}
-
-void net::txq::bh_func()
-{
-    vring* vq = vqueue;
-    net_req* req;
-    u32 len;
-    u16 req_cnt;
-    //
-    // "finalize" at least every half a ring to let the host work in
-    // paralel with us.
-    //
-    const u16 fin_thr = static_cast<u16>(vqueue->size()) / 2;
-
-    while (1) {
-        _parent->virtio_driver::wait_for_queue(vq, &vring::used_ring_not_empty);
-
-        req = static_cast<net_req*>(vq->get_buf_elem(&len));
-
-        for (req_cnt = 0; (req != nullptr) && (req_cnt < fin_thr); req_cnt++) {
-
-            delete req;
-
-            req = static_cast<net_req*>(vq->get_buf_elem(&len));
-        }
-
-        // TODO: when a proper ifdown() is implemented the below assert as it's
-        // now will be no longer valid.
-        
-        // We wouldn't wake up if there won't be a single used element to handle
-        DEBUG_ASSERT(req_cnt, "Hmmm... No completed packets and we are awake!");
-        vq->get_buf_finalize(req_cnt);
-        vqueue->wakeup_waiter();
     }
 }
 
@@ -307,7 +280,6 @@ net::net(pci::device& dev)
 {
     sched::thread* poll_task = &_rxq.poll_task;
     sched::thread* tx_dispatcher_task = &_txq.dispatcher_task;
-    sched::thread* bh_task = &_txq.bh_task;
 
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
@@ -361,13 +333,15 @@ net::net(pci::device& dev)
 
     /* TODO: What if_init() is for? */
     tx_dispatcher_task->start();
-    bh_task->start();
+
+    // Enable indirect descriptor
+    _txq.vqueue->set_use_indirect(true);
 
 
     ether_ifattach(_ifn, _config.mac);
     _msi.easy_register({
         { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
-        { 1, [&] { _txq.vqueue->disable_interrupts(); }, bh_task }
+        { 1, [&] { _txq.vqueue->disable_interrupts(); }, tx_dispatcher_task }
     });
 
     fill_rx_ring();
@@ -623,6 +597,41 @@ void net::fill_rx_ring()
         vq->kick();
 }
 
+void net::tx_gc()
+{
+    net_req * req;
+    u32 len;
+    vring* vq = _txq.vqueue;
+    u16 req_cnt = 0;
+
+    //
+    // "finalize" at least every quoter of a ring to let the host work in
+    // paralel with us.
+    //
+    const u16 fin_thr = static_cast<u16>(vq->size()) / 4;
+
+    req = static_cast<net_req*>(vq->get_buf_elem(&len));
+
+    while(req != nullptr) {
+
+        delete req;
+        req_cnt++;
+
+        if (req_cnt >= fin_thr) {
+            vq->get_buf_finalize(req_cnt);
+            req_cnt = 0;
+        }
+        req = static_cast<net_req*>(vq->get_buf_elem(&len));
+    }
+
+    if (req_cnt) {
+        vq->get_buf_finalize(req_cnt);
+    }
+
+    vq->get_buf_gc();
+}
+
+
 int net::txq::xmit(mbuf* m_head)
 {
     struct mbuf *m;
@@ -630,6 +639,7 @@ int net::txq::xmit(mbuf* m_head)
     auto vq_sg_vec = &vqueue->_sg_vec;
     int rc = 0;
     u64 tx_bytes = 0;
+    u16 vec_sz = 0;
 
     req->um.reset(m_head);
 
@@ -659,11 +669,33 @@ int net::txq::xmit(mbuf* m_head)
         }
     }
 
+    vec_sz = vqueue->_sg_vec.size();
+
+    if (!vqueue->avail_ring_has_room(vec_sz) && vqueue->used_ring_not_empty()) {
+        _parent->tx_gc();
+    }
+
+    // Transmit the packet: don't drop, there is no way to inform the upper
+    // layer about this at this stage.
     if (!vqueue->add_buf(req)) {
-        // Kick the pending work - we are about to sleep
+ 
+        // We are going to sleep - kick() the pending packets
         kick();
 
-        vqueue->add_buf_wait(req);
+        do  {
+            /*printf("Going to enable ints: need %d used_head %d used_idx
+                   %d(%d)\n", vec_sz, vqueue->used_ring_host_head() &
+                   (vqueue->size() - 1), vqueue->used_idx() & (vqueue->size() -
+                   1), vqueue->used_idx());*/
+            _parent->virtio_driver::wait_for_queue(vqueue, &vring::used_ring_not_empty);
+
+            /*printf("Woke up: used_head %d used_idx %d(%d)\n",
+                   vqueue->used_ring_host_head() & (vqueue->size() - 1),
+                   vqueue->used_idx() & (vqueue->size() - 1),
+                   vqueue->used_idx()); */
+
+            _parent->tx_gc();
+        } while (!vqueue->add_buf(req));
     }
 
     trace_virtio_net_tx_packet(_parent->_ifn->if_index, vq_sg_vec->size());

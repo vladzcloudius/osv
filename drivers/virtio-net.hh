@@ -231,6 +231,8 @@ public:
 
     int push_tx(struct mbuf* buff);
 
+    void tx_gc();
+
     // tx ring lock protects this ring for multiple access
     //mutex _tx_ring_lock;
 
@@ -331,6 +333,10 @@ private:
 
         bool empty() const { return _r.empty(); }
 
+        unsigned size() const { return _r.size(); }
+
+        u64 tx_dropped = 0;
+        //u64 tx_pkts    = 0;
     private:
         ring_spsc<tx_buff_desc> _r;
     };
@@ -375,7 +381,6 @@ private:
         txq(net* parent, vring* vq) :
             vqueue(vq),
             dispatcher_task([this] { this->dispatch(); }),
-            bh_task([this] { this->bh_func(); }),
             xmit_it(this), _parent(parent)
         {
             for (auto c : sched::cpus) {
@@ -398,7 +403,7 @@ private:
         vring* vqueue;
         struct txq_stats stats = { 0 };
         dynamic_percpu<std::unique_ptr<tx_cpu_queue> > cpuq;
-        sched::thread dispatcher_task, bh_task;
+        sched::thread dispatcher_task;
         sched::thread_handle new_work_hdl;
 
         osv::nway_merger<std::list<tx_cpu_queue*> > mg;

@@ -169,8 +169,17 @@ public:
 
     // TODO: Rework-rework!!! 
     bool empty() {
-        refill_heap();
-        return _heads_heap.empty();
+        if (!_heads_heap.empty()) {
+            return false;
+        }
+
+        for (SPtr c : _empty_lists) {
+            if (!c->empty()) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     void clear() { _heads_heap = heap_type(); }

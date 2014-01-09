@@ -597,20 +597,19 @@ void net::fill_rx_ring()
         vq->kick();
 }
 
-void net::tx_gc()
+void net::txq::gc()
 {
-    net_req * req;
+    net_req* req;
     u32 len;
-    vring* vq = _txq.vqueue;
     u16 req_cnt = 0;
 
     //
     // "finalize" at least every quoter of a ring to let the host work in
     // paralel with us.
     //
-    const u16 fin_thr = static_cast<u16>(vq->size()) / 4;
+    const u16 fin_thr = static_cast<u16>(vqueue->size()) / 4;
 
-    req = static_cast<net_req*>(vq->get_buf_elem(&len));
+    req = static_cast<net_req*>(vqueue->get_buf_elem(&len));
 
     while(req != nullptr) {
 
@@ -618,17 +617,17 @@ void net::tx_gc()
         req_cnt++;
 
         if (req_cnt >= fin_thr) {
-            vq->get_buf_finalize(req_cnt);
+            vqueue->get_buf_finalize(req_cnt);
             req_cnt = 0;
         }
-        req = static_cast<net_req*>(vq->get_buf_elem(&len));
+        req = static_cast<net_req*>(vqueue->get_buf_elem(&len));
     }
 
     if (req_cnt) {
-        vq->get_buf_finalize(req_cnt);
+        vqueue->get_buf_finalize(req_cnt);
     }
 
-    vq->get_buf_gc();
+    vqueue->get_buf_gc();
 }
 
 
@@ -672,7 +671,7 @@ int net::txq::xmit(mbuf* m_head)
     vec_sz = vqueue->_sg_vec.size();
 
     if (!vqueue->avail_ring_has_room(vec_sz) && vqueue->used_ring_not_empty()) {
-        _parent->tx_gc();
+        gc();
     }
 
     // Transmit the packet: don't drop, there is no way to inform the upper
@@ -694,7 +693,7 @@ int net::txq::xmit(mbuf* m_head)
                    vqueue->used_idx() & (vqueue->size() - 1),
                    vqueue->used_idx()); */
 
-            _parent->tx_gc();
+            gc();
         } while (!vqueue->add_buf(req));
     }
 

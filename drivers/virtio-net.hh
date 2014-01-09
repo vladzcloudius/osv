@@ -230,12 +230,6 @@ public:
     void fill_stats(struct if_data* out_data) const;
 
     int push_tx(struct mbuf* buff);
-
-    void tx_gc();
-
-    // tx ring lock protects this ring for multiple access
-    //mutex _tx_ring_lock;
-
 private:
 
     struct net_req {
@@ -397,6 +391,8 @@ private:
          *         otherwise
          */
         int xmit(struct mbuf *m_head);
+
+        void gc();
 
         /* TODO: deplete the per-cpu rings in ~txq() and in if_qflush() */
 

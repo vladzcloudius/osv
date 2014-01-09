@@ -170,6 +170,9 @@ int net::push_tx(struct mbuf* buff)
     //
     unsigned cur_size = local_cpuq->size();
     if ((size_before < 2) && (cur_size != 0)) {
+        // Don't want to use the wake_with() here since it's safe this way and
+        // I don't want a useless rcu overhead.
+        _txq.check_empty_queues = true;
         _txq.new_work_hdl.wake();
     }
 
@@ -208,9 +211,9 @@ void net::txq::dispatch()
     while (1) {
         if (!mg.pop(xmit_it)) {
             new_work_hdl.reset(*sched::thread::current());
-            sched::thread::wait_until(
-                [this] { return !mg.empty(); });
+            sched::thread::wait_until([this] { return !mg.empty(); });
             new_work_hdl.clear();
+            check_empty_queues = false;
         }
 
         while (mg.pop(xmit_it)) {

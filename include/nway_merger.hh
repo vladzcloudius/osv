@@ -18,6 +18,7 @@
 #include <queue>
 #include <vector>
 #include <list>
+#include <functional>
 
 namespace osv {
 
@@ -74,9 +75,17 @@ public:
  *
  * @note S::value_type must implement operator>().
  */
-template <class C, class Comp = std_ptr_front_comparator<typename C::value_type> >
+template <class C,
+          class Comp = std_ptr_front_comparator<typename C::value_type> >
 class nway_merger {
 public:
+    nway_merger(std::function<bool ()> empty_checker = nullptr) {
+        if (empty_checker == nullptr) {
+            _empty_checker = [this] { return silly_empty_checker(); };
+        } else {
+            _empty_checker = empty_checker;
+        }
+    }
     /**
      * Merges the containers and outputs the resulting stream into the output
      * iterator res (see class description for more details).
@@ -167,21 +176,6 @@ public:
         }
     }
 
-    // TODO: Rework-rework!!! 
-    bool empty() {
-        if (!_heads_heap.empty()) {
-            return false;
-        }
-
-        for (SPtr c : _empty_lists) {
-            if (!c->empty()) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
     void clear() { _heads_heap = heap_type(); }
 
     /**
@@ -221,6 +215,25 @@ public:
         }
     }
 
+    bool empty() const {
+        return _empty_checker();
+    }
+
+    // A stupid implementation of the empty_checker()
+    bool silly_empty_checker() const {
+        if (!_heads_heap.empty()) {
+            return false;
+        }
+
+        for (SPtr c : _empty_lists) {
+            if (!c->empty()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
 private:
     typedef typename C::value_type                             SPtr;
     typedef std::priority_queue<SPtr, std::vector<SPtr>, Comp> heap_type;
@@ -228,6 +241,7 @@ private:
     heap_type _heads_heap;
     C* _sorted_lists;
     std::list<SPtr> _empty_lists;
+    std::function<bool ()> _empty_checker;
 };
 
 } /* namespace osv */

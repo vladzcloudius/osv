@@ -374,7 +374,8 @@ private:
 
         txq(net* parent, vring* vq) :
             vqueue(vq),
-            dispatcher_task([this] { this->dispatch(); }),
+            dispatcher_task([this] { dispatch(); }),
+            mg([this] { return !check_empty_queues; }),
             xmit_it(this), _parent(parent)
         {
             for (auto c : sched::cpus) {
@@ -405,6 +406,7 @@ private:
         osv::nway_merger<std::list<tx_cpu_queue*> > mg;
         tx_xmit_iterator xmit_it;
         u16 pkts_to_kick = 0;
+        bool check_empty_queues = false;
     private:
         void dispatch();
         void bh_func();

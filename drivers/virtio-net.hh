@@ -229,24 +229,29 @@ public:
      */
     void fill_stats(struct if_data* out_data) const;
 
-    int push_tx(struct mbuf* buff);
+    int xmit(struct mbuf* buff);
 private:
 
     struct net_req {
+        net_req() { memset(&mhdr, 0, sizeof(mhdr)); };
+        net_req(mbuf *m) {
+            memset(&mhdr, 0, sizeof(mhdr));
+            um.reset(m);
+        }
+
         struct net::net_hdr_mrg_rxbuf mhdr;
         struct free_deleter {
-            void operator()(struct mbuf *m) {m_freem(m);}
+            void operator()(mbuf *m) { m_freem(m); }
         };
 
-        std::unique_ptr<struct mbuf, free_deleter> um;
+        std::unique_ptr<mbuf, free_deleter> um;
 
-        net_req() {memset(&mhdr,0,sizeof(mhdr));};
     };
 
     std::string _driver_name;
     net_config _config;
 
-    /* TODO: Consider moving all these to txq */
+    // TODO: Consider moving all these to txq
     bool _mergeable_bufs;
     bool _tso_ecn = false;
     bool _status = false;
@@ -351,7 +356,7 @@ private:
          */
         void operator=(const tx_buff_desc& tx_desc) {
             //std::cout<<"Sending packet with ts "<<tx_desc.ts<<std::endl;
-            int error = _q->xmit(tx_desc.buf);
+            int error = _q->xmit_one_locked(tx_desc.buf);
 
             if (error) {
                 // Hmmm... Bad packet?!
@@ -386,14 +391,54 @@ private:
         };
 
         /**
-         * Transmit a single mbuf.
+         * Try to transmit a single packet. Don't block on failure.
+         *
+         * Must run with "running" lock taken.
+         * @param req
+         * @param tx_bytes
+         *
+         * @return 0 if packet has been successfully sent, EINVAL if a packet is
+         *         not well-formed and ENOBUFS if there was no room on a HW ring
+         *         to send the packet.
+         */
+        int try_xmit_one_locked(net_req *req, u64& tx_bytes);
+
+        /**
+         * Transmit a single packet. Will wait for completions if there is no
+         * room on a HW ring.
+         *
+         * Must run with "running" lock taken.
          * @param m_head a buffer to transmits
          *
          * @return 0 in case of success and an appropriate error code
-         *         otherwise
+         *         otherwise.
          */
-        int xmit(struct mbuf *m_head);
+        int xmit_one_locked(mbuf *m_head);
 
+        /**
+         * A main xmit function: will try to bypass the per-CPU queue if
+         * possible and will push the frame into that queue otherwise.
+         *
+         * Either ways it won't block.
+         * @param buf packet descriptor to send
+         *
+         * @return 0 in case of success, EINVAL if a packet is not well-formed
+         *         and ENOBUFS if there was no room (on HW or CPU ring) to send
+         *         the packet.
+         */
+        int xmit(mbuf *buf);
+
+        /**
+         * Push the packet into the per-CPU queue for the current CPU.
+         * @param buf packet descriptor to push
+         *
+         * @return
+         */
+        int push_cpu(mbuf *buf);
+
+        /**
+         * Free the descriptors for the completed packets.
+         */
         void gc();
 
         /* TODO: deplete the per-cpu rings in ~txq() and in if_qflush() */
@@ -402,17 +447,27 @@ private:
         struct txq_stats stats = { 0 };
         dynamic_percpu<std::unique_ptr<tx_cpu_queue> > cpuq;
         sched::thread dispatcher_task;
-        sched::thread_handle new_work_hdl;
+        sched::thread_handle new_work_hdl, running_hdl;
 
         osv::nway_merger<std::list<tx_cpu_queue*> > mg;
         tx_xmit_iterator xmit_it;
         u16 pkts_to_kick = 0;
         bool check_empty_queues = false;
+        /**
+         * This lock will be used to get an exclusive control over the HW
+         * channel.
+         */
+        std::atomic_flag running = ATOMIC_FLAG_INIT;
     private:
         void dispatch();
         void bh_func();
         void kick();
         struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
+        void update_stats(net_req* req, u64 tx_bytes);
+
+        bool try_lock_running();
+        void lock_running();
+        void unlock_running();
         
         net* _parent;
     };

@@ -19,6 +19,7 @@
 #include <string>
 #include <string.h>
 #include <map>
+#include <atomic>
 #include <errno.h>
 #include <osv/debug.h>
 
@@ -104,10 +105,17 @@ static int if_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
  */
 static void if_qflush(struct ifnet *ifp)
 {
-    /*
-     * Since virtio_net currently doesn't have any Tx queue we just
-     * flush the upper layer queues.
-     */
+    //
+    // Since virtio_net currently doesn't have any Tx queue we just
+    // flush the upper layer queues.
+    //
+    // Since the per-CPU Tx queues implementation the above is no longer true.
+    // We have a big hole in the Slow Path implementation (it mostly doesn't
+    // exist ;)), so this is a one more place to fill.
+    //
+    // TODO: Add per-CPU Tx queues flushing here. Most easily checked with
+    // change MTU use case.
+    //
     ::if_qflush(ifp);
 }
 
@@ -123,18 +131,74 @@ static int if_transmit(struct ifnet* ifp, struct mbuf* m_head)
 {
     net* vnet = (net*)ifp->if_softc;
 
-    return vnet->push_tx(m_head);
+    return vnet->xmit(m_head);
 }
 
-int net::push_tx(struct mbuf* buff)
+int net::xmit(struct mbuf* buff)
+{
+    //
+    // We currently have only a single TX queue. Select a proper TXq here when
+    // we implement a multi-queue.
+    //
+    return _txq.xmit(buff);
+}
+
+int net::txq::xmit(mbuf* buff)
+{
+    int rc;
+
+    //
+    // If we succeed to take a RUNNING lock (means there are no other pending
+    // packets, then bypass a per-CPU queues and transmit in-place.
+    // Otherwise, push the frame into the appropriate per-CPU queue.
+    //
+    // If in-place fails due to the lack of buffers in a HW ring - push the
+    // frame into the per-CPU queue as well.
+    //
+    // TODO: We may reconsider the later logic in order to optimize the UDP
+    // stream performance.
+    //
+    if (try_lock_running()) {
+        net_req *req = new net_req(buff);
+        u64 tx_bytes;
+
+        rc = try_xmit_one_locked(req, tx_bytes);
+
+        if (!rc) {
+            // Alright!!!
+            update_stats(req, tx_bytes);
+            vqueue->kick();
+        }
+
+        unlock_running();
+
+        if (rc) {
+            //
+            // The packet is either fucked or we have no buffers on a HW ring.
+            // Be agressive - drop the shit!
+            //
+            // TODO: We may reconsider the decision about the later case when we
+            // succeed to improve the sleep->interrupt->wakeup latency. The same
+            // is about dropping the frame when the per-CPU queue is full.
+            //
+            delete req;
+        }
+    } else {
+        rc = push_cpu(buff);
+    }
+
+    return rc;
+}
+
+int net::txq::push_cpu(mbuf* buff)
 {
     tx_buff_desc new_buff_desc = { buff, nanotime() };
 
     sched::preempt_disable();
 
-    tx_cpu_queue* local_cpuq = _txq.cpuq->get();
+    tx_cpu_queue* local_cpuq = cpuq->get();
 
-    // If size if 0 or 1 we may need to wake to dispatcher
+    // If size is 0 or 1 we may need to wake the dispatcher
     unsigned size_before = local_cpuq->size();
 
     //
@@ -150,17 +214,11 @@ int net::push_tx(struct mbuf* buff)
         sched::preempt_enable();
         m_freem(buff);
         local_cpuq->tx_dropped++;
-        /*std::cout<<"["<<sched::thread::current()->tcpu()->id<<
-            "] Dropping: factor "<<
-            (double)local_cpuq->tx_dropped/local_cpuq->tx_pkts<<std::endl;*/
+
         return ENOBUFS;
     }
 
     sched::preempt_enable();
-
-    //local_cpuq->tx_pkts++;
-
-//    std::cout<<"Sending!!!"<<std::endl;
 
     //
     // Wake the dispatcher if the queue was empty or the dispatcher was
@@ -169,10 +227,12 @@ int net::push_tx(struct mbuf* buff)
     //
     unsigned cur_size = local_cpuq->size();
     if ((size_before < 2) && (cur_size != 0)) {
+        //
         // Don't want to use the wake_with() here since it's safe this way and
         // I don't want a useless rcu overhead.
-        _txq.check_empty_queues = true;
-        _txq.new_work_hdl.wake();
+        //
+        check_empty_queues = true;
+        new_work_hdl.wake();
     }
 
     return 0;
@@ -184,6 +244,33 @@ void net::txq::kick()
         pkts_to_kick = 0;
         vqueue->kick();
     }
+}
+
+bool net::txq::try_lock_running()
+{
+    return !running.test_and_set(std::memory_order_acquire);
+
+}
+
+void net::txq::lock_running()
+{
+    //
+    // Check if there is no fast-transmit hook running already.
+    // If yes - sleep until it ends.
+    //
+    if (!try_lock_running()) {
+        running_hdl.reset(*sched::thread::current());
+
+        sched::thread::wait_until([this] { return try_lock_running(); });
+
+        running_hdl.clear();
+    }
+}
+
+void net::txq::unlock_running()
+{
+    running.clear(std::memory_order_release);
+    running_hdl.wake();
 }
 
 void net::txq::dispatch()
@@ -206,13 +293,20 @@ void net::txq::dispatch()
     // Push them all into the heap
     mg.create_heap(all_cpuqs);
 
+    lock_running();
+
     // Start taking packets one-by-one and send them out
     while (1) {
         if (!mg.pop(xmit_it)) {
+            // We are going to sleep - release the HW channel
+            unlock_running();
+
             new_work_hdl.reset(*sched::thread::current());
             sched::thread::wait_until([this] { return !mg.empty(); });
             new_work_hdl.clear();
             check_empty_queues = false;
+
+            lock_running();
         }
 
         while (mg.pop(xmit_it)) {
@@ -220,10 +314,6 @@ void net::txq::dispatch()
                 kick();
             }
         }
-
-        /* TODO: Wake the per-CPU waiters here */
-
-        //assert(pkts_to_kick);
 
         kick();
     }
@@ -287,9 +377,6 @@ net::net(pci::device& dev)
     virtio_i("VIRTIO NET INSTANCE");
     _id = _instance++;
 
-    // Enable indirect descriptor
-    _txq.vqueue->set_use_indirect(true);
-
     setup_features();
     read_config();
 
@@ -332,6 +419,18 @@ net::net(pci::device& dev)
     }
 
     _ifn->if_capenable = _ifn->if_capabilities | IFCAP_HWSTATS;
+
+    //
+    // Enable indirect descriptors utilization.
+    // 
+    // TODO:
+    // Optimize the indirect descriptors infrastructure:
+    //  - Preallocate a ring of indirect descriptors per vqueue.
+    //  - Consume/recycle from this pool while u can.
+    //  - If there is no more free descriptors in the pool above - allocate like
+    //    we do today.
+    //
+    _txq.vqueue->set_use_indirect(true);
 
     //Start the polling thread before attaching it to the Rx interrupt
     poll_task->start();
@@ -632,26 +731,22 @@ void net::txq::gc()
     vqueue->get_buf_gc();
 }
 
-
-int net::txq::xmit(mbuf* m_head)
+int net::txq::try_xmit_one_locked(net_req *req, u64& tx_bytes)
 {
-    struct mbuf *m;
-    net_req *req = new net_req;
-    auto vq_sg_vec = &vqueue->_sg_vec;
-    int rc = 0;
-    u64 tx_bytes = 0;
+    struct mbuf *m, *m_head = req->um.get();
     u16 vec_sz = 0;
 
-    req->um.reset(m_head);
+    DEBUG_ASSERT(!try_lock_running(), "RUNNING lock not be taken!\n");
+    
+    tx_bytes = 0;
 
     if (m_head->M_dat.MH.MH_pkthdr.csum_flags != 0) {
         m = tx_offload(m_head, &req->mhdr.hdr);
         if ((m_head = m) == nullptr) {
-            delete req;
+            stats.tx_err++;
 
             /* The buffer is not well-formed */
-            rc = EINVAL;
-            goto out;
+            return EINVAL;
         }
     }
 
@@ -679,51 +774,67 @@ int net::txq::xmit(mbuf* m_head)
     // Transmit the packet: don't drop, there is no way to inform the upper
     // layer about this at this stage.
     if (!vqueue->add_buf(req)) {
- 
+        return ENOBUFS;
+    }
+
+    return 0;
+}
+
+/**
+ * Update Tx stats for a single packet
+ * @param req Appropriate net_req for this packet (we need its mhdr)
+ * @param tx_bytes Number of bytes in this packet
+ */
+void net::txq::update_stats(net_req* req, u64 tx_bytes)
+{
+    stats.tx_bytes += tx_bytes;
+    stats.tx_packets++;
+
+    if (req->mhdr.hdr.flags & net_hdr::VIRTIO_NET_HDR_F_NEEDS_CSUM)
+        stats.tx_csum++;
+
+    if (req->mhdr.hdr.gso_type)
+        stats.tx_tso++;
+}
+
+
+int net::txq::xmit_one_locked(mbuf* m_head)
+{
+    net_req *req = new net_req(m_head);
+    int rc = 0;
+    u64 tx_bytes = 0;
+
+    // Transmit the packet: don't drop, there is no way to inform the upper
+    // layer about this at this stage.
+    rc = try_xmit_one_locked(req, tx_bytes);
+    if (rc == EINVAL) {
+        delete req;
+
+        return rc;
+    }
+
+    // We had no HW buffers - wait for completion
+    if (rc) {
         // We are going to sleep - kick() the pending packets
         kick();
 
         do  {
-            /*printf("Going to enable ints: need %d used_head %d used_idx
-                   %d(%d)\n", vec_sz, vqueue->used_ring_host_head() &
-                   (vqueue->size() - 1), vqueue->used_idx() & (vqueue->size() -
-                   1), vqueue->used_idx());*/
-            _parent->virtio_driver::wait_for_queue(vqueue, &vring::used_ring_not_empty);
-
-            /*printf("Woke up: used_head %d used_idx %d(%d)\n",
-                   vqueue->used_ring_host_head() & (vqueue->size() - 1),
-                   vqueue->used_idx() & (vqueue->size() - 1),
-                   vqueue->used_idx()); */
-
+            _parent->virtio_driver::wait_for_queue(vqueue,
+                                                   &vring::used_ring_not_empty);
             gc();
         } while (!vqueue->add_buf(req));
     }
 
-    trace_virtio_net_tx_packet(_parent->_ifn->if_index, vq_sg_vec->size());
-
-out:
+    trace_virtio_net_tx_packet(_parent->_ifn->if_index, vqueue->_sg_vec.size());
 
     /* Update the statistics */
-    switch (rc) {
-    case 0: /* success */
-        stats.tx_bytes += tx_bytes;
-        stats.tx_packets++;
+    update_stats(req, tx_bytes);
 
-        if (req->mhdr.hdr.flags & net_hdr::VIRTIO_NET_HDR_F_NEEDS_CSUM)
-            stats.tx_csum++;
+    // It was a good packet - increase the counter of a "pending for a kick"
+    // packets.
+    pkts_to_kick++;
 
-        if (req->mhdr.hdr.gso_type)
-            stats.tx_tso++;
-
-        // It was a good packet - increase the counter of a "pending for a kick"
-        // packets.
-        pkts_to_kick++;
-        break;
-    default:
-        stats.tx_err++;
-    }
-
-    return rc;
+    return 0;
 }
 
 struct mbuf*

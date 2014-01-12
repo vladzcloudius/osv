@@ -659,11 +659,7 @@ usr.img: bare.img $(out)/usr.manifest $(out)/cmdline
 
 $(jni): INCLUDES += -I /usr/lib/jvm/java/include -I /usr/lib/jvm/java/include/linux/
 
-<<<<<<< HEAD
-bootfs.bin: scripts/mkbootfs.py $(out)/bootfs.manifest $(tests) $(tools) $(java_tests) \
-=======
 bootfs.bin: scripts/mkbootfs.py $(out)/bootfs.manifest $(tests) $(java_tests) $(tools) \
->>>>>>> master
 		tests/testrunner.so java/java.so java/runjava.jar \
 		zpool.so zfs.so
 	$(call quiet, $(src)/scripts/mkbootfs.py -o $@ -d $@.d -m $(out)/bootfs.manifest \

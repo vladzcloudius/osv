@@ -111,7 +111,6 @@ static void if_qflush(struct ifnet *ifp)
     ::if_qflush(ifp);
 }
 
-
 /**
  * Transmits a single mbuf instance.
  * @param ifp upper layer instance handle
@@ -288,6 +287,9 @@ net::net(pci::device& dev)
     virtio_i("VIRTIO NET INSTANCE");
     _id = _instance++;
 
+    // Enable indirect descriptor
+    _txq.vqueue->set_use_indirect(true);
+
     setup_features();
     read_config();
 
@@ -337,10 +339,6 @@ net::net(pci::device& dev)
     /* TODO: What if_init() is for? */
     tx_dispatcher_task->start();
 
-    // Enable indirect descriptor
-    _txq.vqueue->set_use_indirect(true);
-
-
     ether_ifattach(_ifn, _config.mac);
     _msi.easy_register({
         { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
@@ -389,6 +387,7 @@ bool net::read_config()
     _guest_csum = get_guest_feature_bit(VIRTIO_NET_F_GUEST_CSUM);
     _guest_tso4 = get_guest_feature_bit(VIRTIO_NET_F_GUEST_TSO4);
     _host_tso4 = get_guest_feature_bit(VIRTIO_NET_F_HOST_TSO4);
+    _guest_ufo = get_guest_feature_bit(VIRTIO_NET_F_GUEST_UFO);
 
     net_i("Features: %s=%d,%s=%d", "Status", _status, "TSO_ECN", _tso_ecn);
     net_i("Features: %s=%d,%s=%d", "Host TSO ECN", _host_tso_ecn, "CSUM", _csum);
@@ -548,7 +547,7 @@ void net::receiver()
 
             (*_ifn->if_input)(_ifn, m_head);
 
-            trace_virtio_net_rx_packet(_ifn->if_index, len);
+            trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
 
             // The interface may have been stopped while we were
             // passing the packet up the network stack.
@@ -820,8 +819,9 @@ u32 net::get_driver_features(void)
                  | (1 << VIRTIO_NET_F_GUEST_TSO4) \
                  | (1 << VIRTIO_NET_F_HOST_ECN)   \
                  | (1 << VIRTIO_NET_F_HOST_TSO4)  \
-                 | (1 << VIRTIO_NET_F_GUEST_ECN)  \
-                 | (1 << VIRTIO_RING_F_INDIRECT_DESC));
+                 | (1 << VIRTIO_NET_F_GUEST_ECN)
+                 | (1 << VIRTIO_NET_F_GUEST_UFO)
+            );
 }
 
 hw_driver* net::probe(hw_device* dev)

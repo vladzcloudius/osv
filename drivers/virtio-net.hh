@@ -474,7 +474,7 @@ private:
 
         // PENDING (packets) controling functions
         bool has_pending() const;
-        void set_pending();
+        bool test_and_set_pending();
         void clear_pending();
 
         std::atomic<bool> _check_empty_queues;

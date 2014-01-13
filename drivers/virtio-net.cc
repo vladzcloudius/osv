@@ -214,8 +214,14 @@ int net::txq::push_cpu(mbuf* buff)
 
     sched::preempt_enable();
 
-    set_pending();
-    dispatcher_task.wake();
+    //
+    // Save the IPI sending (when dispatcher sleeps for an interrupt) and
+    // exchange in the wake_impl() by paying a price of an exchange operation
+    // here.
+    //
+    if (!test_and_set_pending()) {
+        dispatcher_task.wake();
+    }
 
     return 0;
 }
@@ -266,9 +272,10 @@ bool net::txq::has_pending() const
 {
     return _check_empty_queues.load(std::memory_order_acquire);
 }
-void net::txq::set_pending()
+
+bool net::txq::test_and_set_pending()
 {
-    _check_empty_queues.store(true, std::memory_order_release);
+    return _check_empty_queues.exchange(true, std::memory_order_acq_rel);
 }
 
 void net::txq::clear_pending()

@@ -280,6 +280,9 @@ private:
         u64 tx_csum;    /* CSUM offload requests */
         u64 tx_tso;     /* GSO/TSO packets */
         /* u64 tx_rescheduled; */ /* TODO when we implement xoff */
+        u64 tx_kicks;
+        u64 tx_pkts_from_disp;
+        u64 tx_disp_wakeups;
     };
 
      /* Single Rx queue object */
@@ -336,7 +339,6 @@ private:
         unsigned size() const { return _r.size(); }
 
         u64 tx_dropped = 0;
-        //u64 tx_pkts    = 0;
     private:
         ring_spsc<tx_buff_desc> _r;
     };
@@ -381,8 +383,8 @@ private:
         txq(net* parent, vring* vq) :
             vqueue(vq),
             dispatcher_task([this] { dispatch(); }),
-            mg([this] { return !check_empty_queues; }),
-            xmit_it(this), _parent(parent)
+            mg([this] { return !has_pending(); }),
+            xmit_it(this), _check_empty_queues(false), _parent(parent)
         {
             for (auto c : sched::cpus) {
                 cpuq.for_cpu(c)->
@@ -452,12 +454,12 @@ private:
         osv::nway_merger<std::list<tx_cpu_queue*> > mg;
         tx_xmit_iterator xmit_it;
         u16 pkts_to_kick = 0;
-        bool check_empty_queues = false;
         /**
          * This lock will be used to get an exclusive control over the HW
          * channel.
          */
         std::atomic_flag running = ATOMIC_FLAG_INIT;
+        //int state = 0;
     private:
         void dispatch();
         void bh_func();
@@ -465,10 +467,17 @@ private:
         struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
         void update_stats(net_req* req, u64 tx_bytes);
 
+        // RUNNING state controling functions
         bool try_lock_running();
         void lock_running();
         void unlock_running();
-        
+
+        // PENDING (packets) controling functions
+        bool has_pending() const;
+        void set_pending();
+        void clear_pending();
+
+        std::atomic<bool> _check_empty_queues;
         net* _parent;
     };
 

@@ -148,17 +148,13 @@ int net::txq::xmit(mbuf* buff)
     int rc;
 
     //
-    // If we succeed to take a RUNNING lock (means there are no other pending
-    // packets, then bypass a per-CPU queues and transmit in-place.
+    // If there are no pending packets (in the per-CPU queues) and we've succeed
+    // to take a RUNNING lock, this means that a dispatcher is neither running
+    // nor is scheduled to run. In this case bypass per-CPU queues and
+    // transmit in-place.
     // Otherwise, push the frame into the appropriate per-CPU queue.
     //
-    // If in-place fails due to the lack of buffers in a HW ring - push the
-    // frame into the per-CPU queue as well.
-    //
-    // TODO: We may reconsider the later logic in order to optimize the UDP
-    // stream performance.
-    //
-    if (try_lock_running()) {
+    if (!has_pending() && try_lock_running()) {
         net_req *req = new net_req(buff);
         u64 tx_bytes;
 
@@ -167,6 +163,7 @@ int net::txq::xmit(mbuf* buff)
         if (!rc) {
             // Alright!!!
             update_stats(req, tx_bytes);
+            stats.tx_kicks++;
             vqueue->kick();
         }
 
@@ -175,7 +172,7 @@ int net::txq::xmit(mbuf* buff)
         if (rc) {
             //
             // The packet is either fucked or we have no buffers on a HW ring.
-            // Be agressive - drop the shit!
+            // Be agressive - drop it!
             //
             // TODO: We may reconsider the decision about the later case when we
             // succeed to improve the sleep->interrupt->wakeup latency. The same
@@ -198,9 +195,6 @@ int net::txq::push_cpu(mbuf* buff)
 
     tx_cpu_queue* local_cpuq = cpuq->get();
 
-    // If size is 0 or 1 we may need to wake the dispatcher
-    unsigned size_before = local_cpuq->size();
-
     //
     // Start dropping if a per-CPU ring is full!
     //
@@ -220,20 +214,8 @@ int net::txq::push_cpu(mbuf* buff)
 
     sched::preempt_enable();
 
-    //
-    // Wake the dispatcher if the queue was empty or the dispatcher was
-    // handling the last packet before we added this one and if it hasn't
-    // handled the current packet so far.
-    //
-    unsigned cur_size = local_cpuq->size();
-    if ((size_before < 2) && (cur_size != 0)) {
-        //
-        // Don't want to use the wake_with() here since it's safe this way and
-        // I don't want a useless rcu overhead.
-        //
-        check_empty_queues = true;
-        new_work_hdl.wake();
-    }
+    set_pending();
+    dispatcher_task.wake();
 
     return 0;
 }
@@ -241,6 +223,8 @@ int net::txq::push_cpu(mbuf* buff)
 void net::txq::kick()
 {
     if (pkts_to_kick) {
+        stats.tx_kicks++;
+        stats.tx_pkts_from_disp += pkts_to_kick;
         pkts_to_kick = 0;
         vqueue->kick();
     }
@@ -259,18 +243,37 @@ void net::txq::lock_running()
     // If yes - sleep until it ends.
     //
     if (!try_lock_running()) {
-        running_hdl.reset(*sched::thread::current());
-
         sched::thread::wait_until([this] { return try_lock_running(); });
-
-        running_hdl.clear();
     }
 }
 
 void net::txq::unlock_running()
 {
     running.clear(std::memory_order_release);
-    running_hdl.wake();
+    //
+    // We unlock_running() not from a dispatcher only if the dispatcher is not
+    // running and is waiting for either a new work or for this lock.
+    //
+    // We want to wake it from this function only if there is a new work for a
+    // dispatcher since otherwise there is no point for it to wake up.
+    //
+    if (has_pending()) {
+        dispatcher_task.wake();
+    }
+}
+
+bool net::txq::has_pending() const
+{
+    return _check_empty_queues.load(std::memory_order_acquire);
+}
+void net::txq::set_pending()
+{
+    _check_empty_queues.store(true, std::memory_order_release);
+}
+
+void net::txq::clear_pending()
+{
+    _check_empty_queues.store(false, std::memory_order_release);
 }
 
 void net::txq::dispatch()
@@ -293,18 +296,29 @@ void net::txq::dispatch()
     // Push them all into the heap
     mg.create_heap(all_cpuqs);
 
+    //
+    // Dispatcher holds the RUNNING lock all the time it doesn't sleep waiting
+    // for a new work.
+    //
     lock_running();
 
     // Start taking packets one-by-one and send them out
     while (1) {
+        //
+        // Reset the PENDING state.
+        //
+        // The producer will first add a new element to the heap and only then
+        // set the PENDING state.
+        //
+        clear_pending();
+
+        // Check if there are elements in the heap
         if (!mg.pop(xmit_it)) {
             // We are going to sleep - release the HW channel
             unlock_running();
 
-            new_work_hdl.reset(*sched::thread::current());
             sched::thread::wait_until([this] { return !mg.empty(); });
-            new_work_hdl.clear();
-            check_empty_queues = false;
+            stats.tx_disp_wakeups++;
 
             lock_running();
         }
@@ -357,8 +371,15 @@ void net::fill_qstats(const struct rxq& rxq,
 }
 
 void net::fill_qstats(const struct txq& txq,
-                             struct if_data* out_data) const
+                      struct if_data* out_data) const
 {
+    printf("pkts(%d)/kicks(%d)=%f\n", txq.stats.tx_packets, txq.stats.tx_kicks,
+        (double)txq.stats.tx_packets/txq.stats.tx_kicks);
+    printf("disp_pkts(%d)/disp_wakeups(%d) = %f\n", txq.stats.tx_pkts_from_disp,
+           txq.stats.tx_disp_wakeups,
+           (double)txq.stats.tx_pkts_from_disp/txq.stats.tx_disp_wakeups);
+    //printf("state = %d\n", txq.state);
+
     assert(!out_data->ifi_oerrors && !out_data->ifi_obytes && !out_data->ifi_opackets);
     out_data->ifi_opackets += txq.stats.tx_packets;
     out_data->ifi_obytes   += txq.stats.tx_bytes;
@@ -437,6 +458,8 @@ net::net(pci::device& dev)
 
     /* TODO: What if_init() is for? */
     tx_dispatcher_task->start();
+    // Start with Tx interrupts disabled
+    _txq.vqueue->disable_interrupts();
 
     ether_ifattach(_ifn, _config.mac);
     _msi.easy_register({

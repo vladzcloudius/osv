@@ -212,8 +212,6 @@ int net::txq::push_cpu(mbuf* buff)
         return ENOBUFS;
     }
 
-    sched::preempt_enable();
-
     //
     // Save the IPI sending (when dispatcher sleeps for an interrupt) and
     // exchange in the wake_impl() by paying a price of an exchange operation
@@ -222,6 +220,8 @@ int net::txq::push_cpu(mbuf* buff)
     if (!test_and_set_pending()) {
         dispatcher_task.wake();
     }
+
+    sched::preempt_enable();
 
     return 0;
 }

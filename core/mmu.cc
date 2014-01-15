@@ -24,6 +24,7 @@
 #include <osv/trace.hh>
 #include "arch-mmu.hh"
 #include <stack>
+#include "java/jvm_balloon.hh"
 
 extern void* elf_start;
 extern size_t elf_size;
@@ -260,6 +261,7 @@ enum class skip_empty_opt : bool {no = true, yes = false};
 enum class descend_opt : bool {no = true, yes = false};
 enum class once_opt : bool {no = true, yes = false};
 enum class split_opt : bool {no = true, yes = false};
+enum class account_opt: bool {no = true, yes = false};
 
 // Parameter descriptions:
 //  Allocate - if "yes" page walker will allocate intermediate page if one is missing
@@ -273,7 +275,7 @@ enum class split_opt : bool {no = true, yes = false};
 template<allocate_intermediate_opt Allocate, skip_empty_opt Skip = skip_empty_opt::yes,
         descend_opt Descend = descend_opt::yes, once_opt Once = once_opt::no, split_opt Split = split_opt::yes>
 class page_table_operation {
-private:
+protected:
     template<typename T>  bool opt2bool(T v) { return v == T::yes; }
 public:
     bool allocate_intermediate(void) { return opt2bool(Allocate); }
@@ -420,7 +422,8 @@ public:
     }
 };
 
-template<allocate_intermediate_opt Allocate, skip_empty_opt Skip = skip_empty_opt::yes>
+template<allocate_intermediate_opt Allocate, skip_empty_opt Skip = skip_empty_opt::yes,
+         account_opt Account = account_opt::no>
 class vma_operation :
         public page_table_operation<Allocate, Skip, descend_opt::yes, once_opt::no, split_opt::yes> {
 public:
@@ -429,6 +432,14 @@ public:
     // this function is called at the very end of operate_range(). vma_operation may do
     // whatever cleanup is needed here.
     void finalize(void) { return; }
+
+    ulong account_results(void) { return _total_operated; }
+    void account(size_t size) { if (this->opt2bool(Account)) _total_operated += size; }
+private:
+    // We don't need locking because each walk will create its own instance, so
+    // while two instances can operate over the same linear address (therefore
+    // all the cmpxcghs), the same instance will go linearly over its duty.
+    ulong _total_operated = 0;
 };
 
 /*
@@ -437,7 +448,8 @@ public:
  * (using the given fill function) these pages and sets their permissions to
  * the given ones. This is part of the mmap implementation.
  */
-class populate : public vma_operation<allocate_intermediate_opt::yes, skip_empty_opt::no> {
+template <account_opt T = account_opt::no>
+class populate : public vma_operation<allocate_intermediate_opt::yes, skip_empty_opt::no, T> {
 private:
     fill_page *fill;
     unsigned int perm;
@@ -451,6 +463,8 @@ public:
         fill->fill(phys_to_virt(page), offset, page_size);
         if (!ptep.compare_exchange(make_empty_pte(), make_normal_pte(page, perm))) {
             memory::free_page(phys_to_virt(page));
+        } else {
+            this->account(mmu::page_size);
         }
     }
     bool huge_page(hw_ptep ptep, uintptr_t offset){
@@ -467,6 +481,8 @@ public:
         fill->fill(vpage, offset, huge_page_size);
         if (!ptep.compare_exchange(make_empty_pte(), make_large_pte(page, perm))) {
             memory::free_huge_page(phys_to_virt(page), huge_page_size);
+        } else {
+            this->account(mmu::huge_page_size);
         }
         return true;
     }
@@ -476,7 +492,8 @@ public:
  * Undo the operation of populate(), freeing memory allocated by populate()
  * and marking the pages non-present.
  */
-class unpopulate : public vma_operation<allocate_intermediate_opt::no> {
+template <account_opt T = account_opt::no>
+class unpopulate : public vma_operation<allocate_intermediate_opt::no, skip_empty_opt::yes, T> {
 private:
     std::stack<void*> small_pages;
     std::stack<void*> huge_pages;
@@ -488,11 +505,14 @@ public:
         pt_element pte = ptep.read();
         ptep.write(make_empty_pte());
         small_pages.push(phys_to_virt(pte.addr(false)));
+        this->account(mmu::page_size);
     }
     bool huge_page(hw_ptep ptep, uintptr_t offset) {
         pt_element pte = ptep.read();
         ptep.write(make_empty_pte());
         huge_pages.push(phys_to_virt(pte.addr(false)));
+
+        this->account(mmu::huge_page_size);
         return true;
     }
     void intermediate_page(hw_ptep ptep, uintptr_t offset) {
@@ -513,7 +533,7 @@ public:
     }
 };
 
-class protection : public vma_operation<allocate_intermediate_opt::no> {
+class protection : public vma_operation<allocate_intermediate_opt::no, skip_empty_opt::yes> {
 private:
     unsigned int perm;
     bool do_flush;
@@ -527,6 +547,19 @@ public:
         return true;
     }
     bool tlb_flush_needed(void) {return do_flush;}
+};
+
+class count_maps:
+    public vma_operation<allocate_intermediate_opt::no,
+                         skip_empty_opt::yes, account_opt::yes> {
+public:
+    void small_page(hw_ptep ptep, uintptr_t offset) {
+        this->account(mmu::page_size);
+    }
+    bool huge_page(hw_ptep ptep, uintptr_t offset) {
+        this->account(mmu::huge_page_size);
+        return true;
+    }
 };
 
 class virt_to_phys_map :
@@ -559,7 +592,7 @@ public:
     }
 };
 
-template<typename T> void operate_range(T mapper, void *start, size_t size)
+template<typename T> ulong operate_range(T mapper, void *start, size_t size)
 {
     start = align_down(start, page_size);
     size = std::max(align_up(size, page_size), page_size);
@@ -574,11 +607,12 @@ template<typename T> void operate_range(T mapper, void *start, size_t size)
         tlb_flush();
     }
     mapper.finalize();
+    return mapper.account_results();
 }
 
-template<typename T> void operate_range(T mapper, const vma &vma)
+template<typename T> ulong operate_range(T mapper, const vma &vma)
 {
-    operate_range(mapper, (void*)vma.start(), vma.size());
+    return operate_range(mapper, (void*)vma.start(), vma.size());
 }
 
 phys virt_to_phys_pt(void* virt)
@@ -656,20 +690,26 @@ uintptr_t find_hole(uintptr_t start, uintptr_t size)
     abort();
 }
 
-void evacuate(uintptr_t start, uintptr_t end)
+ulong evacuate(uintptr_t start, uintptr_t end)
 {
     addr_range r(start, end);
     auto range = vma_list.equal_range(r, vma::addr_compare());
+    ulong ret = 0;
     for (auto i = range.first; i != range.second; ++i) {
         i->split(end);
         i->split(start);
         if (contains(start, end, *i)) {
             auto& dead = *i--;
-            operate_range(unpopulate(), dead);
+            auto size = operate_range(unpopulate<account_opt::yes>(), dead);
+            ret += size;
+            if (dead.has_flags(mmap_jvm_heap)) {
+                memory::stats::on_jvm_heap_free(size);
+            }
             vma_list.erase(dead);
             delete &dead;
         }
     }
+    return ret;
     // FIXME: range also indicates where we can insert a new anon_vma, use it
 }
 
@@ -764,14 +804,14 @@ void vpopulate(void* addr, size_t size)
 {
     fill_anon_page fill;
     WITH_LOCK(vma_list_mutex) {
-        operate_range(populate(&fill, perm_rwx), addr, size);
+        operate_range(populate<>(&fill, perm_rwx), addr, size);
     }
 }
 
 void vdepopulate(void* addr, size_t size)
 {
     WITH_LOCK(vma_list_mutex) {
-        operate_range(unpopulate(), addr, size);
+        operate_range(unpopulate<>(), addr, size);
     }
 }
 
@@ -786,10 +826,10 @@ void* map_anon(void* addr, size_t size, unsigned flags, unsigned perm)
     if (flags & mmap_populate) {
         if (flags & mmap_uninitialized) {
             fill_anon_page_noinit zfill;
-            operate_range(populate(&zfill, perm), v, size);
+            operate_range(populate<>(&zfill, perm), v, size);
         } else {
             fill_anon_page zfill;
-            operate_range(populate(&zfill, perm), v, size);
+            operate_range(populate<>(&zfill, perm), v, size);
         }
     }
     return v;
@@ -807,7 +847,7 @@ void* map_file(void* addr, size_t size, unsigned flags, unsigned perm,
     void *v;
     WITH_LOCK(vma_list_mutex) {
         v = (void*) allocate(vma, start, asize, search);
-        operate_range(populate(&fill, perm), v, asize);
+        operate_range(populate<>(&fill, perm), v, asize);
     }
     fill.finalize(f.get());
     return v;
@@ -952,6 +992,17 @@ unsigned vma::perm() const
     return _perm;
 }
 
+void vma::update_flags(unsigned flag)
+{
+    assert(mutex_owned(&vma_list_mutex));
+    _flags |= flag;
+}
+
+bool vma::has_flags(unsigned flag)
+{
+    return _flags & flag;
+}
+
 anon_vma::anon_vma(addr_range range, unsigned perm, unsigned flags)
     : vma(range, perm, flags)
 {
@@ -984,13 +1035,94 @@ void anon_vma::fault(uintptr_t addr, exception_frame *ef)
         size = page_size;
     }
 
+    auto total = 0;
     if (_flags & mmap_uninitialized) {
         fill_anon_page_noinit zfill;
-        operate_range(populate(&zfill, _perm), (void*)addr, size);
+        total = operate_range(populate<account_opt::yes>(&zfill, _perm), (void*)addr, size);
     } else {
         fill_anon_page zfill;
-        operate_range(populate(&zfill, _perm), (void*)addr, size);
+        total = operate_range(populate<account_opt::yes>(&zfill, _perm), (void*)addr, size);
     }
+
+    if (_flags & mmap_jvm_heap) {
+        memory::stats::on_jvm_heap_alloc(total);
+    }
+}
+
+jvm_balloon_vma::jvm_balloon_vma(uintptr_t start, uintptr_t end, balloon *b)
+    : vma(addr_range(start, end), mmu::perm_read, 0), _balloon(b)
+{
+}
+
+void jvm_balloon_vma::split(uintptr_t edge)
+{
+    auto end = _range.end();
+    if (edge <= _range.start() || edge >= end) {
+        return;
+    }
+    auto * n = new jvm_balloon_vma(edge, end, _balloon);
+    _range = addr_range(_range.start(), edge);
+    vma_list.insert(*n);
+}
+
+error jvm_balloon_vma::sync(uintptr_t start, uintptr_t end)
+{
+    return no_error();
+}
+
+void jvm_balloon_vma::fault(uintptr_t addr, exception_frame *ef)
+{
+    std::lock_guard<mutex> guard(vma_list_mutex);
+    // Could block the creation of the next vma. No need to evacuate, we have no pages
+    vma_list.erase(*this);
+    jvm_balloon_fault(_balloon, ef);
+    // We now delete manually, since we've already erased it manually.
+    delete this;
+}
+
+jvm_balloon_vma::~jvm_balloon_vma()
+{
+}
+
+// This function marks an anonymous vma as holding the JVM Heap. The JVM may
+// create mappings for a variety of reasons, not all of them being the heap.
+// Since we're interested in knowing how many pages does the heap hold (to make
+// shrinking decisions) we need to mark those regions. The criteria that we'll
+// use for that is to, every time we create a jvm_balloon_vma, we mark the
+// previous anon vma that was in its place as holding the heap. That will work
+// most of the time and with most GC algos. If that is not sufficient, the
+// JVM will have to tell us about its regions itself.
+static void mark_jvm_heap(void* addr)
+{
+    WITH_LOCK(vma_list_mutex) {
+        u64 a = reinterpret_cast<u64>(addr);
+        auto v = vma_list.find(addr_range(a, a+1), vma::addr_compare());
+        // It has to be somewhere!
+        assert(v != vma_list.end());
+        vma& vma = *v;
+
+        if (!vma.has_flags(mmap_jvm_heap)) {
+            auto mem = operate_range(count_maps(), vma);
+            memory::stats::on_jvm_heap_alloc(mem);
+        }
+
+        vma.update_flags(mmap_jvm_heap);
+    }
+}
+
+ulong map_jvm(void* addr, size_t size, balloon *b)
+{
+    auto start = reinterpret_cast<uintptr_t>(addr);
+
+    mark_jvm_heap(addr);
+
+    auto* vma = new mmu::jvm_balloon_vma(start, start + size, b);
+    WITH_LOCK(vma_list_mutex) {
+        auto ret = evacuate(start, start + size);
+        vma_list.insert(*vma);
+        return ret;
+    }
+    return 0;
 }
 
 file_vma::file_vma(addr_range range, unsigned perm, fileref file, f_offset offset, bool shared)

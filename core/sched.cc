@@ -29,10 +29,13 @@ extern char _percpu_start[], _percpu_end[];
 
 using namespace osv;
 
+void cancel_this_thread_alarm();
+
 namespace sched {
 
 TRACEPOINT(trace_sched_switch, "to %p vold=%g vnew=%g", thread*, float, float);
 TRACEPOINT(trace_sched_wait, "");
+TRACEPOINT(trace_sched_wait_ret, "");
 TRACEPOINT(trace_sched_wake, "wake %p", thread*);
 TRACEPOINT(trace_sched_migrate, "thread=%p cpu=%d", thread*, unsigned);
 TRACEPOINT(trace_sched_queue, "thread=%p", thread*);
@@ -625,6 +628,8 @@ thread::thread(std::function<void ()> func, attr attr, bool main)
 
 thread::~thread()
 {
+    cancel_this_thread_alarm();
+
     if (!_attr._detached) {
         join();
     }
@@ -745,6 +750,7 @@ void thread::wait()
 {
     trace_sched_wait();
     schedule();
+    trace_sched_wait_ret();
 }
 
 void thread::sleep_until(s64 abstime)

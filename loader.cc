@@ -98,7 +98,7 @@ void premain()
 
 int main(int ac, char **av)
 {
-    debug("OSv " OSV_VERSION " Copyright 2013 Cloudius Systems\n");
+    debug("OSv " OSV_VERSION " Copyright 2013-2014 Cloudius Systems\n");
 
     smp_initial_find_current_cpu()->init_on_cpu();
     void main_cont(int ac, char** av);
@@ -109,6 +109,7 @@ static bool opt_leak = false;
 static bool opt_noshutdown = false;
 static bool opt_log_backtrace = false;
 static bool opt_mount = true;
+static bool opt_vga = false;
 
 std::tuple<int, char**> parse_options(int ac, char** av)
 {
@@ -133,6 +134,7 @@ std::tuple<int, char**> parse_options(int ac, char** av)
         ("leak", "start leak detector after boot")
         ("nomount", "don't mount the file system")
         ("noshutdown", "continue running after main() returns")
+        ("vga", "use vga as a console device")
     ;
     bpo::variables_map vars;
     // don't allow --foo bar (require --foo=bar) so we can find the first non-option
@@ -174,6 +176,7 @@ std::tuple<int, char**> parse_options(int ac, char** av)
         }
     }
     opt_mount = !vars.count("nomount");
+    opt_vga = vars.count("vga");
 
     av += nr_options;
     ac -= nr_options;
@@ -223,15 +226,13 @@ void run_main(std::vector<std::string> &vec)
 
     __libc_stack_end = __builtin_frame_address(0);
     auto lib = osv::run(command, args, &ret);
-    if (ret) {
-        debug("program %s returned %d\n", command.c_str(), ret);
-    }
-
-    // success
     if (lib) {
+        // success
+        if (ret) {
+            debug("program %s returned %d\n", command.c_str(), ret);
+        }
         return;
     }
-
     debug("run_main(): cannot execute %s. Powering off.\n", command.c_str());
     osv::poweroff();
 }
@@ -303,7 +304,7 @@ void main_cont(int ac, char** av)
     smp_launch();
     memory::enable_debug_allocator();
     acpi::init();
-    console::console_init();
+    console::console_init(opt_vga);
     enable_trace();
     if (opt_log_backtrace) {
         // can only do this after smp_launch, otherwise the IDT is not initialized,

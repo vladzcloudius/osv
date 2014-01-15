@@ -1,6 +1,7 @@
 
 arch = x64
 BSD_MACHINE_ARCH = amd64
+image ?= default
 img_format ?= qcow2
 fs_size_mb ?= 10240
 local-includes =
@@ -91,6 +92,11 @@ endif
 
 arch-cflags = -msse4.1
 
+ifeq ($(img_format),qcow2)
+tmp_img_format = qcow2
+else
+tmp_img_format = raw
+endif
 
 quiet = $(if $V, $1, @echo " $2"; $1)
 very-quiet = $(if $V, $1, @$1)
@@ -135,14 +141,6 @@ tests/%.o: COMMON += -fPIC -DBOOST_TEST_DYN_LINK
 %.so: %.o
 	$(makedir)
 	$(q-build-so)
-
-# Some .so's need to refer to libstdc++ so it will be linked at run time.
-# The majority of our .so don't actually need libstdc++, so didn't add it
-# by default.
-tests/tst-queue-mpsc.so: CFLAGS+=-lstdc++
-tests/tst-mutex.so: CFLAGS+=-lstdc++
-tests/tst-tcp.so: CFLAGS += -lstdc++
-tests/tst-strerror_r.so: CFLAGS += -lstdc++
 
 sys-includes = $(jdkbase)/include $(jdkbase)/include/linux
 autodepend = -MD -MT $@ -MP
@@ -211,6 +209,7 @@ tests += tests/tst-threadcomplete.so
 tests += tests/tst-timerfd.so
 tests += tests/tst-nway-merger.so
 tests += tests/tst-memmove.so
+tests += tests/tst-pthread-clock.so
 
 tests/hello/Hello.class: javabase=tests/hello
 
@@ -538,6 +537,7 @@ drivers += drivers/hpet.o
 drivers += drivers/xenfront.o drivers/xenfront-xenbus.o drivers/xenfront-blk.o
 drivers += drivers/pvpanic.o
 drivers += drivers/random.o
+drivers += java/jvm_balloon.o
 
 objects = bootfs.o
 objects += arch/x64/dump.o
@@ -587,6 +587,7 @@ objects += core/percpu-worker.o
 objects += core/dhcp.o
 objects += core/run.o
 objects += core/shutdown.o
+objects += core/version.o
 
 include $(src)/fs/build.mk
 include $(src)/libc/build.mk
@@ -637,7 +638,7 @@ $(boost-tests): $(boost-lib-dir)/libboost_unit_test_framework-mt.so \
 bsd/%.o: COMMON += -DSMP -D'__FBSDID(__str__)=extern int __bogus__' -D__x86_64__
 
 jni = java/jni/balloon.so java/jni/elf-loader.so java/jni/networking.so \
-	java/jni/stty.so java/jni/tracepoint.so java/jni/power.so
+	java/jni/stty.so java/jni/tracepoint.so java/jni/power.so java/jni/monitor.so
 
 bare.raw: loader.img
 	$(call quiet, qemu-img create $@ 100M, QEMU-IMG CREATE $@)
@@ -645,17 +646,21 @@ bare.raw: loader.img
 	$(call quiet, $(src)/scripts/imgedit.py setpartition $@ 2 $(zfs-start) $(zfs-size), IMGEDIT $@)
 
 bare.img: scripts/mkzfs.py $(jni) bare.raw $(out)/bootfs.manifest
-	$(call quiet, echo Creating $@ as $(img_format))
-	$(call quiet, qemu-img convert -f raw -O $(img_format) bare.raw $@)
+	$(call quiet, echo Creating $@ as $(tmp_img_format))
+	$(call quiet, qemu-img convert -f raw -O $(tmp_img_format) bare.raw $@)
 	$(call quiet, qemu-img resize $@ +$(fs_size_mb)M > /dev/null 2>&1)
 	$(src)/scripts/mkzfs.py -o $@ -d $@.d -m $(out)/bootfs.manifest
 
-usr.img: bare.img $(out)/usr.manifest $(out)/cmdline
+usr.tmp: bare.img $(out)/usr.manifest $(out)/cmdline
 	$(call quiet, cp bare.img $@)
 	$(src)/scripts/upload_manifest.py -o $@ -d $@.d -m $(out)/usr.manifest \
 		-D jdkbase=$(jdkbase) -D gccbase=$(gccbase) -D \
 		glibcbase=$(glibcbase) -D miscbase=$(miscbase)
 	$(call quiet, $(src)/scripts/imgedit.py setargs $@ $(shell cat $(out)/cmdline), IMGEDIT $@)
+
+usr.img: usr.tmp
+	$(call quiet, echo Convert $@ to $(img_format))
+	$(call quiet, qemu-img convert -f $(tmp_img_format) -O $(img_format) usr.tmp $@)
 
 $(jni): INCLUDES += -I /usr/lib/jvm/java/include -I /usr/lib/jvm/java/include/linux/
 
@@ -669,8 +674,6 @@ bootfs.bin: scripts/mkbootfs.py $(out)/bootfs.manifest $(tests) $(java_tests) $(
 bootfs.o: bootfs.bin
 
 tools/mkfs/mkfs.so: tools/mkfs/mkfs.o libzfs.so
-
-tools/cpiod/cpiod.so: CFLAGS += -lstdc++
 
 tools/cpiod/cpiod.so: tools/cpiod/cpiod.o tools/cpiod/cpio.o libzfs.so
 
@@ -694,23 +697,18 @@ gen/include/osv/version.h: $(src)/scripts/gen-version-header
 
 $(src)/build.mk: $(generated-headers)
 
-# Generate a manifest of tests that inherits from the "tests" and ##############
-# "java_tests" variables                                          ##############
-
-# Func: append a first arg to a file name passed as a second arg
-append_to_file = $(shell echo $(1) >> $(2))
-
-# Generate a tests manifest
-$(out)/test.manifest.gen: $(src)/build.mk
-	$(shell rm -f $@)
-	touch $@
-	$(foreach test,$(tests),$(call append_to_file,/$(test): ./$(test),$@))
-	$(foreach test,$(java_tests),$(call append_to_file,/java/$(notdir $(test)): ./$(test),$@))
+# Automatically generate modules/tests/usr.manifest which includes all tests.
+$(src)/modules/tests/usr.manifest: $(src)/build.mk
+	@echo "  generating modules/tests/usr.manifest"
+	@cat $@.skel > $@
+	@echo $(tests) | tr ' ' '\n' | awk '{print "/" $$0 ": ./" $$0}' >> $@
+	@echo $(java_tests) | tr ' ' '\n' | \
+	    awk '{a=$$0; sub(".*/","",a); print "/java/" a ": ./" $$0}' >> $@
 
 ################################################################################
 
 .PHONY: process-modules
-process-modules: bootfs.manifest.skel usr.manifest.skel $(out)/test.manifest.gen
+process-modules: bootfs.manifest.skel usr.manifest.skel $(src)/modules/tests/usr.manifest
 	cd $(out)/module \
 	  && jdkbase=$(jdkbase) OSV_BASE=$(src) OSV_BUILD_PATH=$(out) $(src)/scripts/module.py --image-config $(image)
 

@@ -244,6 +244,7 @@ int kill(pid_t pid, int sig)
 static mutex alarm_mutex;
 static condvar alarm_cond;
 static sched::thread *alarm_thread = nullptr;
+static sched::thread *owner_thread = nullptr;
 static s64 alarm_due = 0;
 
 void alarm_thread_func()
@@ -257,11 +258,39 @@ void alarm_thread_func()
                 if (tmr.expired()) {
                     alarm_due = 0;
                     kill(0, SIGALRM);
+                    if(!is_sig_ign(signal_actions[SIGALRM])) {
+                        owner_thread->interrupted(true);
+                    }
                 } else {
                     tmr.cancel();
                 }
             } else {
                 alarm_cond.wait(alarm_mutex);
+            }
+        }
+    }
+}
+
+static void cancel_alarm_ll()
+{
+    alarm_due = 0;
+    owner_thread = nullptr;
+    alarm_cond.wake_one();
+}
+
+static void set_alarm_ll(s64 new_alarm_due)
+{
+    alarm_due = new_alarm_due;
+    owner_thread = sched::thread::current();
+    alarm_cond.wake_one();
+}
+
+void cancel_this_thread_alarm()
+{
+    if(owner_thread == sched::thread::current()) {
+        WITH_LOCK(alarm_mutex) {
+            if(owner_thread == sched::thread::current()) {
+                cancel_alarm_ll();
             }
         }
     }
@@ -280,12 +309,11 @@ unsigned int alarm(unsigned int seconds)
             ret = (alarm_due - now) / 1_s;
         }
         if (seconds) {
-            alarm_due = now + seconds*1_s;
+            set_alarm_ll(now + seconds*1_s);
         } else {
             // alarm(0) means cancel alarm, not an alarm in 0 seconds.
-            alarm_due = 0;
+            cancel_alarm_ll();
         }
-        alarm_cond.wake_one();
     }
     return ret;
 }

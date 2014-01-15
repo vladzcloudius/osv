@@ -12,7 +12,6 @@ silentant = $(if $V,, scripts/silentant.py)
 only-if = $(if $(strip $(subst 0,,$1)),$2,@\#)
 
 mgmt = 1
-image = default
 
 # It's not practical to build large Java programs from make, because of
 # how Java does dependencies; so we use ant instead.  But we also cannot
@@ -34,7 +33,6 @@ all: $(submake) $(modulemk)
 $(submake) $(modulemk): Makefile
 	mkdir -p $(dir $@)
 	echo 'mode = $(mode)' > $@
-	echo 'image = $(image)' >> $@
 	echo 'src = $(abspath .)' >> $@
 	echo 'out = $(abspath $(out))' >> $@
 	echo 'VPATH = $(abspath .)' >> $@
@@ -43,10 +41,6 @@ $(submake) $(modulemk): Makefile
 clean:
 	$(call quiet, rm -rf build/$(mode), CLEAN)
 	$(call only-if, $(mgmt), $(call quiet, cd mgmt && ./gradlew --daemon clean >> /dev/null, GRADLE CLEAN))
-
-external:
-	make -C external/glibc-testsuite
-.PHONY: external
 
 check: all
 	./scripts/test.py

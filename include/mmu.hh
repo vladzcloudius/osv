@@ -16,6 +16,7 @@
 #include <osv/error.h>
 
 struct exception_frame;
+class balloon;
 /**
  * MMU namespace
  */
@@ -73,6 +74,7 @@ enum {
     mmap_populate    = 1ul << 1,
     mmap_shared      = 1ul << 2,
     mmap_uninitialized = 1ul << 3,
+    mmap_jvm_heap    = 1ul << 4,
 };
 
 class vma {
@@ -90,6 +92,8 @@ public:
     virtual void split(uintptr_t edge) = 0;
     virtual error sync(uintptr_t start, uintptr_t end) = 0;
     virtual int validate_perm(unsigned perm) { return 0; }
+    void update_flags(unsigned flag);
+    bool has_flags(unsigned flag);
     class addr_compare;
 protected:
     addr_range _range;
@@ -133,9 +137,22 @@ private:
     bool _shared;
 };
 
+class jvm_balloon_vma : public vma {
+public:
+    jvm_balloon_vma(uintptr_t start, uintptr_t end, balloon *b);
+    virtual ~jvm_balloon_vma();
+    virtual void split(uintptr_t edge) override;
+    virtual error sync(uintptr_t start, uintptr_t end) override;
+    virtual void fault(uintptr_t addr, exception_frame *ef) override;
+private:
+    balloon *_balloon;
+};
+
 void* map_file(void* addr, size_t size, unsigned flags, unsigned perm,
               fileref file, f_offset offset);
 void* map_anon(void* addr, size_t size, unsigned flags, unsigned perm);
+ulong map_jvm(void* addr, size_t size, balloon *b);
+
 error munmap(void* addr, size_t size);
 error mprotect(void *addr, size_t size, unsigned int perm);
 error msync(void* addr, size_t length, int flags);

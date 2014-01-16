@@ -3,6 +3,7 @@ import sys
 import errno
 import argparse
 import re
+import os
 import math
 from itertools import ifilter
 from collections import defaultdict
@@ -158,6 +159,20 @@ def show_profile(args, sample_producer):
             time_range=time_range,
             max_levels=args.max_levels)
 
+def extract(args):
+    if args.exe:
+        elf_path = args.exe
+    elif args.debug:
+        elf_path = 'build/debug/loader.elf'
+    else:
+        elf_path = 'build/release/loader.elf'
+
+    if (os.path.isfile(elf_path)):
+       sys.exit(os.system("gdb %s -batch -ex conn -ex \"osv trace save %s\"" % (elf_path, args.tracefile)))
+    else:
+        print("error: %s not found" % (elf_path))
+        sys.exit(1)
+
 def prof_wait(args):
     show_profile(args, get_wait_profile)
 
@@ -298,15 +313,14 @@ def list_timed(args):
 
         for timed in timed_traces:
             t = timed.trace
-            print('0x%016x %2d %20s %7s %-20s %s%s\n'
-                         % (t.thread,
+            print '0x%016x %2d %20s %7s %-20s %s%s' % (
+                            t.thread,
                             t.cpu,
                             trace.format_time(t.time),
                             trace.format_duration(timed.duration),
                             t.name,
                             t.format_data(),
-                            bt_formatter(t.backtrace),
-                            ))
+                            bt_formatter(t.backtrace))
 
 def add_trace_listing_options(parser):
     add_time_slicing_options(parser)
@@ -359,6 +373,13 @@ if __name__ == "__main__":
     add_profile_options(cmd_prof_hit)
     cmd_prof_hit.add_argument("-t", "--tracepoint", action="store", required=True, help="name of the tracepint to count")
     cmd_prof_hit.set_defaults(func=prof_hit)
+
+    cmd_extract = subparsers.add_parser("extract", help="extract trace from running instance", description="""
+        Extracts trace from a running OSv instance via GDB.
+        """)
+    add_symbol_resolution_options(cmd_extract)
+    add_trace_source_options(cmd_extract)
+    cmd_extract.set_defaults(func=extract)
 
     args = parser.parse_args()
 

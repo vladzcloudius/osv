@@ -145,7 +145,7 @@ int net::xmit(struct mbuf* buff)
 
 int net::txq::xmit(mbuf* buff)
 {
-    int rc;
+    int rc = 0;
 
     //
     // If there are no pending packets (in the per-CPU queues) and we've succeed
@@ -160,8 +160,8 @@ int net::txq::xmit(mbuf* buff)
 
         rc = try_xmit_one_locked(req, tx_bytes);
 
+        // Alright!!!
         if (!rc) {
-            // Alright!!!
             update_stats(req, tx_bytes);
             stats.tx_kicks++;
             vqueue->kick();
@@ -169,47 +169,84 @@ int net::txq::xmit(mbuf* buff)
 
         unlock_running();
 
-        if (rc) {
-            //
-            // The packet is either fucked or we have no buffers on a HW ring.
-            // Be agressive - drop it!
-            //
-            // TODO: We may reconsider the decision about the later case when we
-            // succeed to improve the sleep->interrupt->wakeup latency. The same
-            // is about dropping the frame when the per-CPU queue is full.
-            //
+        if (rc == EINVAL) {
+            // The packet is fucked - drop it!
             delete req;
+        } else if (rc) {
+            //
+            // There hasn't been enough buffers on the HW ring to send the
+            // packet - push it into the per-CPU queue, dispatcher will handle
+            // it later.
+            //
+            rc = 0;
+            push_cpu(buff);
         }
     } else {
-        rc = push_cpu(buff);
+        push_cpu(buff);
     }
 
     return rc;
 }
 
-int net::txq::push_cpu(mbuf* buff)
+void net::txq::push_cpu(mbuf* buff)
 {
-    tx_buff_desc new_buff_desc = { buff, nanotime() };
+    bool success = false;
 
     sched::preempt_disable();
 
+    tx_buff_desc new_buff_desc = { buff, clock::get()->uptime() };
     tx_cpu_queue* local_cpuq = cpuq->get();
 
-    //
-    // Start dropping if a per-CPU ring is full!
-    //
-    // If there is a situation when the dispatcher doesn't keep up then we need
-    // to pacify the sender anyway. Dropping the frame and informing the upper
-    // layers about what we did is the fastest and acceptible solution.
-    //
-    // We've allocated the per-CPU ring to be big enough for this not to happen.
-    //
-    if (!local_cpuq->push(new_buff_desc)) {
-        sched::preempt_enable();
-        m_freem(buff);
-        local_cpuq->tx_dropped++;
+    while (!local_cpuq->push(new_buff_desc)) {
+        wait_record wr(sched::thread::current());
+        local_cpuq->waitq.push(&wr);
 
-        return ENOBUFS;
+        //
+        // Try to push again in order to resolve the nasty race:
+        //
+        // If dispatcher has succeeded to empty the whole ring before to added
+        // our record to the waitq then without this push() we could have stuck
+        // until somebody else adds another packet to this specific cpuq. In
+        // this case adding a packet will ensure that dispatcher eventually
+        // handles it and "wake()s" us up.
+        //
+        // If we fail to add the packet here then this means that the queue has
+        // still been full AFTER we added the wait_record and we need to wait
+        // until dispatcher cleans it up and wakes us.
+        //
+        // We can't exit this function until dispatcher pop()s our wait_record
+        // since it's allocated on a stack.
+        //
+        success = local_cpuq->push(new_buff_desc);
+        if (success && !test_and_set_pending()) {
+            dispatcher_task.wake();
+        }
+
+        sched::preempt_enable();
+
+        wr.wait();
+
+        // we are done - get out!
+        if (success) {
+            return;
+        }
+
+        sched::preempt_disable();
+
+        // Refresh: we could have been moved to a different CPU
+        local_cpuq = cpuq->get();
+        //
+        // Refresh: another thread could have pushed its packet before us and it
+        //          had an earlier timestamp - we have to keep the timestampes
+        //          ordered in the CPU queue.
+        //
+        new_buff_desc.ts = clock::get()->uptime();
+
+        //
+        // We want to try to push() the packet here if the previous push() in
+        // this loop (see above) has failed since if this push() succeeds we may
+        // break out from the loop immediately.
+        //
     }
 
     //
@@ -223,7 +260,7 @@ int net::txq::push_cpu(mbuf* buff)
 
     sched::preempt_enable();
 
-    return 0;
+    return;
 }
 
 void net::txq::kick()
@@ -263,7 +300,7 @@ void net::txq::unlock_running()
     // We want to wake it from this function only if there is a new work for a
     // dispatcher since otherwise there is no point for it to wake up.
     //
-    if (has_pending()) {
+    if ((&dispatcher_task != sched::thread::current()) && has_pending()) {
         dispatcher_task.wake();
     }
 }

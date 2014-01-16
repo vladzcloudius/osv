@@ -16,7 +16,9 @@
 #include "drivers/virtio.hh"
 #include "drivers/pci-device.hh"
 #include "osv/percpu.hh"
+#include "osv/wait_record.hh"
 #include "lockfree/ring.hh"
+#include "lockfree/queue-mpsc.hh"
 #include "nway_merger.hh"
 
 namespace virtio {
@@ -330,17 +332,42 @@ private:
         bool push(T v) { return _r.push(v); }
 
         void erase(iterator &it) {
-            T tmp;
+            T tmp = { 0 };
             _r.pop(tmp);
+
+            debug_check(tmp);
+
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+
+            // Wake the next waiter if there is any
+            wait_record* wr = waitq.pop();
+            if (wr) {
+                wr->wake();
+            }
         }
 
         bool empty() const { return _r.empty(); }
 
         unsigned size() const { return _r.size(); }
 
-        u64 tx_dropped = 0;
+        lockfree::queue_mpsc<wait_record> waitq;
     private:
         ring_spsc<tx_buff_desc> _r;
+
+#ifndef NDEBUG
+        void debug_check(T& tmp) {
+            if (tmp.ts < _last_ts) {
+                printf("Time went backwards: curr_ts(%d) < prev_ts(%d)\n",
+                       tmp.ts, _last_ts);
+                assert(0);
+            }
+
+            _last_ts = tmp.ts;
+        }
+        s64 _last_ts = 0;
+#else
+        void debug_check(T& tmp) {}
+#endif
     };
 
     struct txq;
@@ -433,10 +460,8 @@ private:
         /**
          * Push the packet into the per-CPU queue for the current CPU.
          * @param buf packet descriptor to push
-         *
-         * @return
          */
-        int push_cpu(mbuf *buf);
+        void push_cpu(mbuf *buf);
 
         /**
          * Free the descriptors for the completed packets.

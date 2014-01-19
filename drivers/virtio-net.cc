@@ -194,7 +194,7 @@ void net::txq::push_cpu(mbuf* buff)
 
     sched::preempt_disable();
 
-    tx_buff_desc new_buff_desc = { buff, clock::get()->uptime() };
+    tx_buff_desc new_buff_desc = { buff, get_ts() };
     tx_cpu_queue* local_cpuq = cpuq->get();
 
     while (!local_cpuq->push(new_buff_desc)) {
@@ -240,7 +240,7 @@ void net::txq::push_cpu(mbuf* buff)
         //          had an earlier timestamp - we have to keep the timestampes
         //          ordered in the CPU queue.
         //
-        new_buff_desc.ts = clock::get()->uptime();
+        new_buff_desc.ts = get_ts();
 
         //
         // We want to try to push() the packet here if the previous push() in

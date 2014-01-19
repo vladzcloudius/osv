@@ -15,6 +15,7 @@
 
 #include "drivers/virtio.hh"
 #include "drivers/pci-device.hh"
+#include "drivers/clock.hh"
 #include "osv/percpu.hh"
 #include "osv/wait_record.hh"
 #include "lockfree/ring.hh"
@@ -356,7 +357,7 @@ private:
 
 #ifndef NDEBUG
         void debug_check(T& tmp) {
-            if (tmp.ts < _last_ts) {
+            if (tmp.ts <= _last_ts) {
                 printf("Time went backwards: curr_ts(%d) < prev_ts(%d)\n",
                        tmp.ts, _last_ts);
                 assert(0);
@@ -364,7 +365,7 @@ private:
 
             _last_ts = tmp.ts;
         }
-        s64 _last_ts = 0;
+        s64 _last_ts = -1;
 #else
         void debug_check(T& tmp) {}
 #endif
@@ -501,6 +502,13 @@ private:
         bool has_pending() const;
         bool test_and_set_pending();
         void clear_pending();
+
+        /**
+         * @return the current timestamp
+         */
+        inline s64 get_ts() {
+            return clock::get()->uptime();
+        }
 
         std::atomic<bool> _check_empty_queues;
         net* _parent;

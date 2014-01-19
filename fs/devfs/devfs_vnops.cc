@@ -102,7 +102,7 @@ devfs_close(struct vnode *vp, struct file *fp)
 }
 
 static int
-devfs_read(struct vnode *vp, struct uio *uio, int ioflags)
+devfs_read(struct vnode *vp, struct file *fp, struct uio *uio, int ioflags)
 {
 	return device_read((device*)vp->v_data, uio, ioflags);
 }
@@ -143,7 +143,6 @@ devfs_lookup(struct vnode *dvp, char *name, struct vnode **vpp)
 	for (;;) {
 		error = device_info(&info);
 		if (error) {
-			printf("device %s not found\n", name);
 			return ENOENT;
 		}
 		if (!strncmp(info.name, name, MAXDEVNAME))

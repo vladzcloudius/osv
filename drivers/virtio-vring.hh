@@ -137,14 +137,7 @@ class virtio_driver;
         // within the ring. Should be called by add_buf
         // It was separated from the get_buf flow to allow parallelism of the two
         void get_buf_gc();
-#if 0
-        //_used_ring_host_head != _used->_idx.load(std::memory_order_relaxed)
-        u16 used_ring_host_head() const { return _used_ring_host_head; }
-        u16 used_idx() const {
-            return _used->_idx.load(std::memory_order_relaxed);
-        }
-        bool avail_count() const { return _avail_count; }
-#endif
+
         bool used_ring_not_empty() const;
         bool used_ring_is_half_empty() const;
         bool used_ring_can_gc() const;

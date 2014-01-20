@@ -21,4 +21,3 @@ int rand(void)
 {
 	return _rand_r(&seed);
 }
-

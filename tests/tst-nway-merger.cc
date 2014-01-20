@@ -38,25 +38,25 @@ struct my_struct {
     }
 };
 
-template <class T>
+template <class T, unsigned MaxSize>
 class my_spsc_ring {
 public:
 
     class my_spsc_ring_iterator {
     public:
-        T& operator *() const { return _r->_r.front(); }
+        const T& operator *() const { return _r->front(); }
 
     private:
         friend class my_spsc_ring;
-        explicit my_spsc_ring_iterator(my_spsc_ring<T>* r) : _r(r) { }
-        my_spsc_ring<T>* _r;
+        explicit my_spsc_ring_iterator(my_spsc_ring<T, MaxSize>* r) : _r(r) { }
+        my_spsc_ring<T, MaxSize>* _r;
     };
 
     typedef my_spsc_ring_iterator      iterator;
 
-    explicit my_spsc_ring(unsigned sz) : _r(sz) { }
+    explicit my_spsc_ring() {}
 
-    T& front() { return _r.front(); }
+    const T& front() const { return _r.front(); }
     iterator begin() { return iterator(this); }
 
     bool push(T v) { return _r.push(v); }
@@ -69,10 +69,10 @@ public:
     bool empty() const { return _r.empty(); }
 
 private:
-    ring_spsc<T> _r;
+    ring_spsc<T, MaxSize> _r;
 };
 
-typedef my_spsc_ring<my_struct> my_spsc_queue;
+typedef my_spsc_ring<my_struct, 8> my_spsc_queue;
 
 static void fill_abc(my_spsc_queue& a, my_spsc_queue& b, my_spsc_queue& c)
 {
@@ -224,7 +224,7 @@ int main(int argc, char *argv[])
     }
 
     { // ring_spsc test
-        my_spsc_queue a(8), b(4), c(8);
+        my_spsc_queue a, b, c;
         array<my_spsc_queue*, 3> sa;
 
         sa[0] = &a;

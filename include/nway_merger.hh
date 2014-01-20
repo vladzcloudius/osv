@@ -41,7 +41,7 @@ public:
     }
 };
 
-/** @class nway_merger "nway_merge.hh"
+/** @class nway_merger "nway_merger.hh"
  * Merge N containers S sorted in an increasing order into an iterator as a
  * sorted sequence in an increasing order. The containers collection is passed
  * to the method merge() in a container C.
@@ -197,7 +197,16 @@ public:
     }
 
     /**
-     * Push back all sequences from the _empty_list back to the heap
+     * Push back all sequences from the _empty_list back to the heap.
+     *
+     * TODO:
+     * Come up with something better that walking on the whole list and check
+     * each list. One option is to use bitfield array and then use
+     * count_leading_zeros() based function to efficiently get the next set bit
+     * which may represent the non-empty list.
+     *
+     * This inefficiency may count in case of VMs with a large number of vCPUs
+     * when most of the queues would be empty.
      */
     void refill_heap() {
         auto it = _empty_lists.begin();

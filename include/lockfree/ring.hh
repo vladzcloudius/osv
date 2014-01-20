@@ -20,33 +20,21 @@
 //
 // spsc ring of fixed size
 //
-template<class T>
+template<class T, unsigned MaxSize>
 class ring_spsc {
 public:
-    ring_spsc(unsigned max_size): _begin(0), _end(0), _max_size(max_size),
-                                  _max_size_mask(max_size - 1)
-    {
-        assert(is_power_of_two(_max_size));
-        _ring = new T[_max_size];
-    }
-
-    ~ring_spsc()
-    {
-        delete[] _ring;
-    }
+    ring_spsc(): _begin(0), _end(0) { assert(is_power_of_two(MaxSize)); }
 
     bool push(const T& element)
     {
         unsigned end = _end.load(std::memory_order_relaxed);
 
-        // Consider making it a DEBUG_ASSERT() since it's going to cause a
-        // false sharing on a "_begin" cache line
-        if (size() >= _max_size) {
+        if (size() >= MaxSize) {
             return false;
         }
 
         _ring[end & _max_size_mask] = element;
-        _end.store(end + 1, std::memory_order_relaxed);
+        _end.store(end + 1, std::memory_order_release);
 
         return true;
     }
@@ -55,8 +43,6 @@ public:
     {
         unsigned beg = _begin.load(std::memory_order_relaxed);
 
-        // Consider making it a DEBUG_ASSERT() since it's going to cause a
-        // false sharing on a "_begin" cache line
         if (empty()) {
             return false;
         }
@@ -71,7 +57,7 @@ public:
         return size() == 0;
     }
 
-    T& front() const {
+    const T& front() const {
         DEBUG_ASSERT(!empty(), "calling front() on an empty queue!");
 
         unsigned beg = _begin.load(std::memory_order_relaxed);
@@ -89,9 +75,8 @@ public:
 private:
     std::atomic<unsigned> _begin CACHELINE_ALIGNED;
     std::atomic<unsigned> _end CACHELINE_ALIGNED;
-    const unsigned _max_size;
-    const unsigned _max_size_mask;
-    T* _ring;
+    const unsigned _max_size_mask = MaxSize - 1;
+    T _ring[MaxSize];
 };
 
 //

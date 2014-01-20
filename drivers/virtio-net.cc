@@ -170,7 +170,7 @@ int net::txq::xmit(mbuf* buff)
         unlock_running();
 
         if (rc == EINVAL) {
-            // The packet is fucked - drop it!
+            // The packet is f...d - drop it!
             delete req;
         } else if (rc) {
             //
@@ -199,10 +199,10 @@ void net::txq::push_cpu(mbuf* buff)
 
     while (!local_cpuq->push(new_buff_desc)) {
         wait_record wr(sched::thread::current());
-        local_cpuq->waitq.push(&wr);
+        local_cpuq->push_new_waiter(&wr);
 
         //
-        // Try to push again in order to resolve the nasty race:
+        // Try to push again in order to resolve a nasty race:
         //
         // If dispatcher has succeeded to empty the whole ring before to added
         // our record to the waitq then without this push() we could have stuck
@@ -214,8 +214,8 @@ void net::txq::push_cpu(mbuf* buff)
         // still been full AFTER we added the wait_record and we need to wait
         // until dispatcher cleans it up and wakes us.
         //
-        // We can't exit this function until dispatcher pop()s our wait_record
-        // since it's allocated on a stack.
+        // All this is because we can't exit this function until dispatcher
+        // pop()s our wait_record since it's allocated on our stack.
         //
         success = local_cpuq->push(new_buff_desc);
         if (success && !test_and_set_pending()) {
@@ -241,12 +241,6 @@ void net::txq::push_cpu(mbuf* buff)
         //          ordered in the CPU queue.
         //
         new_buff_desc.ts = get_ts();
-
-        //
-        // We want to try to push() the packet here if the previous push() in
-        // this loop (see above) has failed since if this push() succeeds we may
-        // break out from the loop immediately.
-        //
     }
 
     //
@@ -322,12 +316,14 @@ void net::txq::clear_pending()
 
 void net::txq::dispatch()
 {
+    //
     // Kick at least every full ring of packets.
     // Othersize a deadlock is possible:
     //   1) We post a full ring of buffers without a kick().
     //   2) We block on posting of the next buffer.
     //   3) HW doesn't know there is a work to do.
     //   4) Dead lock.
+    //
     const int kick_thresh = vqueue->size();
 
     // Create a collection of a per-CPU queues
@@ -351,8 +347,8 @@ void net::txq::dispatch()
         //
         // Reset the PENDING state.
         //
-        // The producer will first add a new element to the heap and only then
-        // set the PENDING state.
+        // The producer thread will first add a new element to the heap and only
+        // then set the PENDING state.
         //
         clear_pending();
 
@@ -417,11 +413,14 @@ void net::fill_qstats(const struct rxq& rxq,
 void net::fill_qstats(const struct txq& txq,
                       struct if_data* out_data) const
 {
+//#define TX_DEBUG
+#ifdef TX_DEBUG
     printf("pkts(%d)/kicks(%d)=%f\n", txq.stats.tx_packets, txq.stats.tx_kicks,
         (double)txq.stats.tx_packets/txq.stats.tx_kicks);
     printf("disp_pkts(%d)/disp_wakeups(%d) = %f\n", txq.stats.tx_pkts_from_disp,
            txq.stats.tx_disp_wakeups,
            (double)txq.stats.tx_pkts_from_disp/txq.stats.tx_disp_wakeups);
+#endif
     //printf("state = %d\n", txq.state);
 
     assert(!out_data->ifi_oerrors && !out_data->ifi_obytes && !out_data->ifi_opackets);
@@ -803,12 +802,12 @@ int net::txq::try_xmit_one_locked(net_req *req, u64& tx_bytes)
     struct mbuf *m, *m_head = req->um.get();
     u16 vec_sz = 0;
 
-    DEBUG_ASSERT(!try_lock_running(), "RUNNING lock not be taken!\n");
+    DEBUG_ASSERT(!try_lock_running(), "RUNNING lock not taken!\n");
     
     tx_bytes = 0;
 
     if (m_head->M_dat.MH.MH_pkthdr.csum_flags != 0) {
-        m = tx_offload(m_head, &req->mhdr.hdr);
+        m = offload(m_head, &req->mhdr.hdr);
         if ((m_head = m) == nullptr) {
             stats.tx_err++;
 
@@ -838,8 +837,6 @@ int net::txq::try_xmit_one_locked(net_req *req, u64& tx_bytes)
         gc();
     }
 
-    // Transmit the packet: don't drop, there is no way to inform the upper
-    // layer about this at this stage.
     if (!vqueue->add_buf(req)) {
         return ENOBUFS;
     }
@@ -847,11 +844,6 @@ int net::txq::try_xmit_one_locked(net_req *req, u64& tx_bytes)
     return 0;
 }
 
-/**
- * Update Tx stats for a single packet
- * @param req Appropriate net_req for this packet (we need its mhdr)
- * @param tx_bytes Number of bytes in this packet
- */
 void net::txq::update_stats(net_req* req, u64 tx_bytes)
 {
     stats.tx_bytes += tx_bytes;
@@ -871,8 +863,12 @@ int net::txq::xmit_one_locked(mbuf* m_head)
     int rc = 0;
     u64 tx_bytes = 0;
 
+    //
     // Transmit the packet: don't drop, there is no way to inform the upper
     // layer about this at this stage.
+    //
+    // In case the packet is a crap there is no other option though.
+    //
     rc = try_xmit_one_locked(req, tx_bytes);
     if (rc == EINVAL) {
         delete req;
@@ -894,18 +890,19 @@ int net::txq::xmit_one_locked(mbuf* m_head)
 
     trace_virtio_net_tx_packet(_parent->_ifn->if_index, vqueue->_sg_vec.size());
 
-    /* Update the statistics */
+    // Update the statistics
     update_stats(req, tx_bytes);
 
+    //
     // It was a good packet - increase the counter of a "pending for a kick"
     // packets.
+    //
     pkts_to_kick++;
 
     return 0;
 }
 
-struct mbuf*
-net::txq::tx_offload(struct mbuf* m, struct net_hdr* hdr)
+mbuf* net::txq::offload(mbuf* m, net_hdr* hdr)
 {
     struct ether_header *eh;
     struct ether_vlan_header *evh;

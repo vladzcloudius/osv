@@ -92,11 +92,7 @@ static unsigned mempool_cpuid() {
 //
 
 const unsigned free_objects_ring_size = 256;
-class free_objects_type : public ring_spsc<void*> {
-public:
-    free_objects_type() : ring_spsc<void*>(free_objects_ring_size) {}
-};
-
+typedef ring_spsc<void*, free_objects_ring_size> free_objects_type;
 free_objects_type pcpu_free_list[sched::max_cpus][sched::max_cpus];
 
 struct freelist_full_sync_object {
@@ -1233,7 +1229,6 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
     if (!is_power_of_two(alignment)) {
         return EINVAL;
     }
-
     void *ret = malloc(size);
     if (!ret) {
         return ENOMEM;

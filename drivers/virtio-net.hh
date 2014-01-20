@@ -25,6 +25,16 @@
 namespace virtio {
 
 /**
+ * This is the size of the buffers ring of the FreeBSD virtio-net
+ * driver. So, we are using this as a baseline. We may ajust this value
+ * later (cut it down maybe?!).
+ *
+ * Currently this gives us ~16 pages per one CPU ring.
+ */
+const static unsigned cpu_txq_size	= 4096;
+
+/**
+ * @class net
  * virtio net device class
  */
 class net : public virtio_driver {
@@ -232,12 +242,20 @@ public:
      */
     void fill_stats(struct if_data* out_data) const;
 
-    int xmit(struct mbuf* buff);
+    /**
+     * Transmit a single frame.
+     *
+     * @note This function may sleep!
+     * @param buff frame to transmit
+     *
+     * @return 0 in case of success, EINVAL in case the frame is not
+     *         well-formed.
+     */
+    int xmit(mbuf* buff);
 private:
 
     struct net_req {
-        net_req() { memset(&mhdr, 0, sizeof(mhdr)); };
-        net_req(mbuf *m) {
+        explicit net_req(mbuf *m) {
             memset(&mhdr, 0, sizeof(mhdr));
             um.reset(m);
         }
@@ -248,7 +266,6 @@ private:
         };
 
         std::unique_ptr<mbuf, free_deleter> um;
-
     };
 
     std::string _driver_name;
@@ -282,7 +299,6 @@ private:
         u64 tx_drops;   /* Number of dropped packets */
         u64 tx_csum;    /* CSUM offload requests */
         u64 tx_tso;     /* GSO/TSO packets */
-        /* u64 tx_rescheduled; */ /* TODO when we implement xoff */
         u64 tx_kicks;
         u64 tx_pkts_from_disp;
         u64 tx_disp_wakeups;
@@ -297,7 +313,12 @@ private:
         struct rxq_stats stats = { 0 };
     };
 
-    /* optionally: use std::pair */
+    /**
+     * @struct tx_buff_desc
+     *
+     * A pair of packet handle and the timestamp.
+     * Two objects are compared by their timestamps.
+     */
     struct tx_buff_desc {
         mbuf* buf;
         s64 ts;
@@ -308,31 +329,47 @@ private:
         }
     };
 
+    /**
+     * @class tx_cpu_queue
+     * This class will represent a single per-CPU Tx queue.
+     *
+     * These queues will be subject to the merging by the nway_merger class in
+     * order to address the reordering issue. Therefore this class will
+     * implement the following methods/classes:
+     *  - push(val)
+     *  - empty()
+     *  - front(), which will return the iterator that implements:
+     *      - operator *() to access the underlying value
+     *  - erase(it), which would pop the front element
+     */
     class tx_cpu_queue {
     public:
-        typedef tx_buff_desc T;
+        class tx_queue_iterator;
+        typedef tx_buff_desc        T;
+        typedef tx_queue_iterator   iterator;
+
+        explicit tx_cpu_queue() {}
 
         class tx_queue_iterator {
         public:
-
-            T& operator *() const { return _r->_r.front(); }
+            const T& operator *() const { return _cpuq->front(); }
 
         private:
+            // We want only tx_cpu_queue to be able to create such interators.
             friend class tx_cpu_queue;
-            explicit tx_queue_iterator(tx_cpu_queue* r) : _r(r) { }
-            tx_cpu_queue* _r;
+            explicit tx_queue_iterator(tx_cpu_queue* cpuq) : _cpuq(cpuq) { }
+            tx_cpu_queue* _cpuq;
         };
 
-        typedef tx_queue_iterator      iterator;
-
-        explicit tx_cpu_queue(unsigned sz) : _r(sz) { }
-
-        T& front() { return _r.front(); }
-        iterator begin() { return iterator(this); }
-
-        bool push(T v) { return _r.push(v); }
-
-        void erase(iterator &it) {
+        /**
+         * Delete the item pointed by the given iterator and wake the next
+         * waiter if there is any.
+         *
+         * Since iterator may only point to the front element we just need to
+         * pop() the underlying ring_spsc.
+         * @param it iterator handle
+         */
+        void erase(iterator& it) {
             T tmp = { 0 };
             _r.pop(tmp);
 
@@ -341,21 +378,25 @@ private:
             std::atomic_thread_fence(std::memory_order_seq_cst);
 
             // Wake the next waiter if there is any
-            wait_record* wr = waitq.pop();
+            wait_record* wr = _waitq.pop();
             if (wr) {
                 wr->wake();
             }
         }
 
+        // Some access/info functions
+        const T& front() const { return _r.front(); }
+        iterator begin() { return iterator(this); }
+        bool push(T v) { return _r.push(v); }
         bool empty() const { return _r.empty(); }
-
         unsigned size() const { return _r.size(); }
+        void push_new_waiter(wait_record* wr) { _waitq.push(wr); }
 
-        lockfree::queue_mpsc<wait_record> waitq;
     private:
-        ring_spsc<tx_buff_desc> _r;
+        lockfree::queue_mpsc<wait_record> _waitq;
+        ring_spsc<T, cpu_txq_size> _r;
 
-#ifndef NDEBUG
+#ifdef TX_DEBUG
         void debug_check(T& tmp) {
             if (tmp.ts <= _last_ts) {
                 printf("Time went backwards: curr_ts(%d) < prev_ts(%d)\n",
@@ -372,6 +413,14 @@ private:
     };
 
     struct txq;
+    /**
+     * @class tx_xmit_iterator
+     *
+     * This iterator will be used as an output iterator by the nway_merger
+     * instance that will merge the per-CPU tx_cpu_queue instances.
+     *
+     * It's operator=() will actually sent the packet to the (virtual) HW.
+     */
     class tx_xmit_iterator {
     public:
         tx_xmit_iterator(txq* txq) : _q(txq) { }
@@ -385,7 +434,6 @@ private:
          * @param tx_desc
          */
         void operator=(const tx_buff_desc& tx_desc) {
-            //std::cout<<"Sending packet with ts "<<tx_desc.ts<<std::endl;
             int error = _q->xmit_one_locked(tx_desc.buf);
 
             if (error) {
@@ -397,17 +445,13 @@ private:
         txq* _q;
     };
 
-    /* Single Tx queue object TODO: Make it a class */
+    /**
+     * @class txq
+     * A single Tx queue object.
+     *
+     *  TODO: Make it a class!
+     */
     struct txq {
-        /**
-         * This is the size of the buffers ring of the FreeBSD virtio-net
-         * driver. So, I'm using this as a baseline. We may ajust this value
-         * later (cut it down maybe?!).
-         *
-         * Currently this gives us ~16 pages per one CPU ring.
-         */
-        const unsigned cpu_txq_size	= 4096;
-
         txq(net* parent, vring* vq) :
             vqueue(vq),
             dispatcher_task([this] { dispatch(); }),
@@ -415,8 +459,7 @@ private:
             xmit_it(this), _check_empty_queues(false), _parent(parent)
         {
             for (auto c : sched::cpus) {
-                cpuq.for_cpu(c)->
-                    reset(new tx_cpu_queue(cpu_txq_size));
+                cpuq.for_cpu(c)->reset(new tx_cpu_queue);
             }
         };
 
@@ -469,14 +512,13 @@ private:
          */
         void gc();
 
-        /* TODO: deplete the per-cpu rings in ~txq() and in if_qflush() */
+        /* TODO: drain the per-cpu rings in ~txq() and in if_qflush() */
 
         vring* vqueue;
         struct txq_stats stats = { 0 };
         dynamic_percpu<std::unique_ptr<tx_cpu_queue> > cpuq;
         sched::thread dispatcher_task;
         sched::thread_handle new_work_hdl, running_hdl;
-
         osv::nway_merger<std::list<tx_cpu_queue*> > mg;
         tx_xmit_iterator xmit_it;
         u16 pkts_to_kick = 0;
@@ -485,12 +527,37 @@ private:
          * channel.
          */
         std::atomic_flag running = ATOMIC_FLAG_INIT;
-        //int state = 0;
     private:
         void dispatch();
         void bh_func();
+
+        /**
+         * Kick the vqueue if there are pending packets.
+         *
+         * Currently we assume that this function is called only from the
+         * dispatcher and updates some corresponding statistics.
+         *
+         * If the above assumtion breaks, the implementation should be updated
+         * correspondingly.
+         */
         void kick();
-        struct mbuf* tx_offload(struct mbuf* m, struct net_hdr* hdr);
+
+        /**
+         * Update the packet handle and the net_hdr according to various offload
+         * features.
+         * @param m     Tx packet handle
+         * @param hdr   net_hdr to update
+         *
+         * @return The updated Tx packet handle. If packet wasn't well-formed
+         *         nullptr will be returned.
+         */
+        mbuf* offload(mbuf* m, net_hdr* hdr);
+
+        /**
+         * Update Tx stats for a single packet in case of a successful xmit.
+         * @param req Appropriate net_req for this packet (we need its mhdr)
+         * @param tx_bytes Number of bytes in this packet
+         */
         void update_stats(net_req* req, u64 tx_bytes);
 
         // RUNNING state controling functions

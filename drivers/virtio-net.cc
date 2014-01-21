@@ -145,45 +145,47 @@ int net::xmit(struct mbuf* buff)
 
 int net::txq::xmit(mbuf* buff)
 {
+    //
+    // If there are pending packets (in the per-CPU queues) or we've failed to
+    // take a RUNNING lock push the packet in the per-CPU queue.
+    //
+    // Otherwise means that a dispatcher is neither running nor is
+    // scheduled to run. In this case bypass per-CPU queues and transmit
+    // in-place.
+    //
+    if (has_pending() || !try_lock_running()) {
+        push_cpu(buff);
+        return 0;
+    }
+
     int rc = 0;
+    net_req *req = new net_req(buff);
+    u64 tx_bytes;
 
-    //
-    // If there are no pending packets (in the per-CPU queues) and we've succeed
-    // to take a RUNNING lock, this means that a dispatcher is neither running
-    // nor is scheduled to run. In this case bypass per-CPU queues and
-    // transmit in-place.
-    // Otherwise, push the frame into the appropriate per-CPU queue.
-    //
-    if (!has_pending() && try_lock_running()) {
-        net_req *req = new net_req(buff);
-        u64 tx_bytes;
+    // If we are here means we've aquired a RUNNING lock
+    rc = try_xmit_one_locked(req, tx_bytes);
 
-        rc = try_xmit_one_locked(req, tx_bytes);
-
-        // Alright!!!
-        if (!rc) {
-            update_stats(req, tx_bytes);
-            stats.tx_kicks++;
-            if (vqueue->kick()) {
-                stats.tx_hv_kicks++;
-            }
+    // Alright!!!
+    if (!rc) {
+        update_stats(req, tx_bytes);
+        stats.tx_kicks++;
+        if (vqueue->kick()) {
+            stats.tx_hv_kicks++;
         }
+    }
 
-        unlock_running();
+    unlock_running();
 
-        if (rc == EINVAL) {
-            // The packet is f...d - drop it!
-            delete req;
-        } else if (rc) {
-            //
-            // There hasn't been enough buffers on the HW ring to send the
-            // packet - push it into the per-CPU queue, dispatcher will handle
-            // it later.
-            //
-            rc = 0;
-            push_cpu(buff);
-        }
-    } else {
+    if (rc == EINVAL) {
+        // The packet is f...d - drop it!
+        delete req;
+    } else if (rc) {
+        //
+        // There hasn't been enough buffers on the HW ring to send the
+        // packet - push it into the per-CPU queue, dispatcher will handle
+        // it later.
+        //
+        rc = 0;
         push_cpu(buff);
     }
 

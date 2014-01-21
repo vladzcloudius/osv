@@ -22,6 +22,8 @@
 #include "lockfree/queue-mpsc.hh"
 #include "nway_merger.hh"
 
+//#define TX_DEBUG
+
 namespace virtio {
 
 /**
@@ -285,23 +287,26 @@ private:
     u32 _hdr_size;
 
     struct rxq_stats {
-        u64 rx_packets; /* if_ipackets */
-        u64 rx_bytes;   /* if_ibytes */
-        u64 rx_drops;   /* if_iqdrops */
-        u64 rx_csum;    /* number of packets with correct csum */
-        u64 rx_csum_err;/* number of packets with a bad checksum */
+        u64 rx_packets;         // if_ipackets
+        u64 rx_bytes;           // if_ibytes
+        u64 rx_drops;           // if_iqdrops
+        u64 rx_csum;            // number of packets with correct csum
+        u64 rx_csum_err;        // number of packets with a bad checksum
     };
 
     struct txq_stats {
-        u64 tx_packets; /* if_opackets */
-        u64 tx_bytes;   /* if_obytes */
-        u64 tx_err;     /* Number of broken packets */
-        u64 tx_drops;   /* Number of dropped packets */
-        u64 tx_csum;    /* CSUM offload requests */
-        u64 tx_tso;     /* GSO/TSO packets */
-        u64 tx_kicks;
-        u64 tx_pkts_from_disp;
-        u64 tx_disp_wakeups;
+        u64 tx_packets;         // if_opackets
+        u64 tx_bytes;           // if_obytes
+        u64 tx_err;             // Number of broken packets
+        u64 tx_drops;           // Number of dropped packets
+        u64 tx_csum;            // CSUM offload requests
+        u64 tx_tso;             // GSO/TSO packets
+        u64 tx_kicks;           // Number of calls for vqueue->kick()
+        u64 tx_hv_kicks;        // Number of actual kicks to Hypervisor
+        u64 tx_pkts_from_disp;  // Number of packets handled in dispatcher
+
+        u64 tx_disp_wakeups;    // Number of times dispatcher woke on a new work
+                                // arrived
     };
 
      /* Single Rx queue object */

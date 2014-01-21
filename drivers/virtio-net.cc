@@ -164,7 +164,9 @@ int net::txq::xmit(mbuf* buff)
         if (!rc) {
             update_stats(req, tx_bytes);
             stats.tx_kicks++;
-            vqueue->kick();
+            if (vqueue->kick()) {
+                stats.tx_hv_kicks++;
+            }
         }
 
         unlock_running();
@@ -260,10 +262,12 @@ void net::txq::push_cpu(mbuf* buff)
 void net::txq::kick()
 {
     if (pkts_to_kick) {
-        stats.tx_kicks++;
         stats.tx_pkts_from_disp += pkts_to_kick;
         pkts_to_kick = 0;
-        vqueue->kick();
+        stats.tx_kicks++;
+        if (vqueue->kick()) {
+            stats.tx_hv_kicks++;
+        }
     }
 }
 
@@ -413,10 +417,13 @@ void net::fill_qstats(const struct rxq& rxq,
 void net::fill_qstats(const struct txq& txq,
                       struct if_data* out_data) const
 {
-//#define TX_DEBUG
 #ifdef TX_DEBUG
-    printf("pkts(%d)/kicks(%d)=%f\n", txq.stats.tx_packets, txq.stats.tx_kicks,
-        (double)txq.stats.tx_packets/txq.stats.tx_kicks);
+    printf("pkts(%d)/kicks(%d)=%f\n", txq.stats.tx_packets,
+           txq.stats.tx_hv_kicks,
+           (double)txq.stats.tx_packets/txq.stats.tx_hv_kicks);
+    printf("hv_kicks(%d)/kicks(%d)=%f\n", txq.stats.tx_hv_kicks,
+           txq.stats.tx_kicks,
+           (double)txq.stats.tx_hv_kicks/txq.stats.tx_kicks);
     printf("disp_pkts(%d)/disp_wakeups(%d) = %f\n", txq.stats.tx_pkts_from_disp,
            txq.stats.tx_disp_wakeups,
            (double)txq.stats.tx_pkts_from_disp/txq.stats.tx_disp_wakeups);

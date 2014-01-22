@@ -106,7 +106,7 @@ public:
         while (!_heads_heap.empty()) {
             SPtr t = _heads_heap.top();
             _heads_heap.pop();
-            decltype(t->begin()) t_it = t->begin();
+            auto t_it = t->begin();
 
             /* Get the element from the "HEAD" of the container */
             *res = *t_it;
@@ -148,7 +148,7 @@ public:
         if (!_heads_heap.empty()) {
             SPtr t = _heads_heap.top();
             _heads_heap.pop();
-            decltype(t->begin()) t_it = t->begin();
+            auto t_it = t->begin();
 
             /* Get the element from the "HEAD" of the container */
             *res = *t_it;

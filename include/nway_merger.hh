@@ -79,13 +79,6 @@ template <class C,
           class Comp = std_ptr_front_comparator<typename C::value_type> >
 class nway_merger {
 public:
-    nway_merger(std::function<bool ()> empty_checker = nullptr) {
-        if (empty_checker == nullptr) {
-            _empty_checker = [this] { return silly_empty_checker(); };
-        } else {
-            _empty_checker = empty_checker;
-        }
-    }
     /**
      * Merges the containers and outputs the resulting stream into the output
      * iterator res (see class description for more details).
@@ -138,13 +131,13 @@ public:
      * 1) Sorts the front elements.
      * 2) Pushes the least among them into the output iterator.
      *
-     * This function is convinient when u want to merge the input streams that
+     * This function is convenient when you want to merge the input streams that
      * are sometimes empty in a step-by-step manner.
      *
      * @param sorted_lists
      * @param res
      *
-     * @return true if the elemnt has been popped and false if there was nothing
+     * @return true if the element has been popped and false if there was nothing
      *         to pop (all input sequences were empty).
      */
     template <class OutputIt>
@@ -224,8 +217,9 @@ public:
         }
     }
 
-    bool empty() const {
-        return _empty_checker();
+    template <class EmptyChecker>
+    bool empty(EmptyChecker checker) const {
+        return checker();
     }
 
     // A stupid implementation of the empty_checker()
@@ -250,9 +244,7 @@ private:
     heap_type _heads_heap;
     C* _sorted_lists;
     std::list<SPtr> _empty_lists;
-    std::function<bool ()> _empty_checker;
 };
-
 } /* namespace osv */
 
 

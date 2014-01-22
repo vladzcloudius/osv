@@ -363,7 +363,7 @@ void net::txq::dispatch()
             // We are going to sleep - release the HW channel
             unlock_running();
 
-            sched::thread::wait_until([this] { return !mg.empty(); });
+            sched::thread::wait_until([this] { return has_pending(); });
             stats.tx_disp_wakeups++;
 
             lock_running();
@@ -430,8 +430,6 @@ void net::fill_qstats(const struct txq& txq,
            txq.stats.tx_disp_wakeups,
            (double)txq.stats.tx_pkts_from_disp/txq.stats.tx_disp_wakeups);
 #endif
-    //printf("state = %d\n", txq.state);
-
     assert(!out_data->ifi_oerrors && !out_data->ifi_obytes && !out_data->ifi_opackets);
     out_data->ifi_opackets += txq.stats.tx_packets;
     out_data->ifi_obytes   += txq.stats.tx_bytes;

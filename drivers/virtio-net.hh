@@ -460,7 +460,6 @@ private:
         txq(net* parent, vring* vq) :
             vqueue(vq),
             dispatcher_task([this] { dispatch(); }),
-            mg([this] { return !has_pending(); }),
             xmit_it(this), _check_empty_queues(false), _parent(parent)
         {
             for (auto c : sched::cpus) {

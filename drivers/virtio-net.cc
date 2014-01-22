@@ -106,13 +106,6 @@ static int if_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 static void if_qflush(struct ifnet *ifp)
 {
     //
-    // Since virtio_net currently doesn't have any Tx queue we just
-    // flush the upper layer queues.
-    //
-    // Since the per-CPU Tx queues implementation the above is no longer true.
-    // We have a big hole in the Slow Path implementation (it mostly doesn't
-    // exist ;)), so this is a one more place to fill.
-    //
     // TODO: Add per-CPU Tx queues flushing here. Most easily checked with
     // change MTU use case.
     //

@@ -577,7 +577,7 @@ private:
         /**
          * @return the current timestamp
          */
-        inline s64 get_ts() {
+        s64 get_ts() {
             return clock::get()->uptime();
         }
 

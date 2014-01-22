@@ -254,7 +254,7 @@ void net::txq::push_cpu(mbuf* buff)
     return;
 }
 
-void net::txq::kick()
+inline void net::txq::kick()
 {
     if (pkts_to_kick) {
         stats.tx_pkts_from_disp += pkts_to_kick;
@@ -266,13 +266,13 @@ void net::txq::kick()
     }
 }
 
-bool net::txq::try_lock_running()
+inline bool net::txq::try_lock_running()
 {
     return !running.test_and_set(std::memory_order_acquire);
 
 }
 
-void net::txq::lock_running()
+inline void net::txq::lock_running()
 {
     //
     // Check if there is no fast-transmit hook running already.
@@ -283,7 +283,7 @@ void net::txq::lock_running()
     }
 }
 
-void net::txq::unlock_running()
+inline void net::txq::unlock_running()
 {
     running.clear(std::memory_order_release);
     //
@@ -298,17 +298,17 @@ void net::txq::unlock_running()
     }
 }
 
-bool net::txq::has_pending() const
+inline bool net::txq::has_pending() const
 {
     return _check_empty_queues.load(std::memory_order_acquire);
 }
 
-bool net::txq::test_and_set_pending()
+inline bool net::txq::test_and_set_pending()
 {
     return _check_empty_queues.exchange(true, std::memory_order_acq_rel);
 }
 
-void net::txq::clear_pending()
+inline void net::txq::clear_pending()
 {
     _check_empty_queues.store(false, std::memory_order_release);
 }
@@ -844,7 +844,7 @@ int net::txq::try_xmit_one_locked(net_req *req, u64& tx_bytes)
     return 0;
 }
 
-void net::txq::update_stats(net_req* req, u64 tx_bytes)
+inline void net::txq::update_stats(net_req* req, u64 tx_bytes)
 {
     stats.tx_bytes += tx_bytes;
     stats.tx_packets++;

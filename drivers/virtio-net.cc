@@ -353,6 +353,9 @@ void net::txq::dispatch()
 
         // Check if there are elements in the heap
         if (!mg.pop(xmit_it)) {
+            // Wake all unwoken waiters before going to sleep
+            wake_waiters_all();
+
             // We are going to sleep - release the HW channel
             unlock_running();
 

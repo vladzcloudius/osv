@@ -377,15 +377,50 @@ private:
         void erase(iterator& it) {
             T tmp = { 0 };
             _r.pop(tmp);
+            _popped_since_wakeup++;
 
             debug_check(tmp);
 
+            //
+            // Wake the waiters after a threshold or when the last packet has
+            // been popped.
+            // The last one is needed to ensure there won't be stuck waiters in
+            // case of a race described in net::txq::push_cpu().
+            //
+            if (_r.empty() || (_popped_since_wakeup >= _wakeup_threshold)) {
+                wake_waiters();
+            }
+        }
+
+        void wake_waiters() {
+            if (!_popped_since_wakeup) {
+                return;
+            }
+
+            //
+            // If we see the empty waiters queue we want to clear the popped
+            // packets counter in order to keep the wakeup logic consistent.
+            //
+            if (_waitq.empty()) {
+                _popped_since_wakeup = 0;
+                return;
+            }
+
+            //
+            // We need to ensure that woken thread will see the new state of the
+            // queue (after the pop()).
+            //
             std::atomic_thread_fence(std::memory_order_seq_cst);
 
-            // Wake the next waiter if there is any
-            wait_record* wr = _waitq.pop();
-            if (wr) {
-                wr->wake();
+            for (; _popped_since_wakeup; _popped_since_wakeup--) {
+                // Wake the next waiter if there is any
+                wait_record* wr = _waitq.pop();
+                if (wr) {
+                    wr->wake();
+                } else {
+                    _popped_since_wakeup = 0;
+                    return;
+                }
             }
         }
 
@@ -400,6 +435,9 @@ private:
     private:
         lockfree::queue_mpsc<wait_record> _waitq;
         ring_spsc<T, cpu_txq_size> _r;
+
+        static const int _wakeup_threshold = cpu_txq_size / 2;
+        int _popped_since_wakeup = 0;
 
 #ifdef TX_DEBUG
         void debug_check(T& tmp) {
@@ -466,6 +504,12 @@ private:
                 cpuq.for_cpu(c)->reset(new tx_cpu_queue);
             }
         };
+
+        void wake_waiters_all() {
+            for (auto c : sched::cpus) {
+                cpuq.for_cpu(c)->get()->wake_waiters();
+            }
+        }
 
         /**
          * Try to transmit a single packet. Don't block on failure.

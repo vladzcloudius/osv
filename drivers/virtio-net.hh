@@ -257,17 +257,13 @@ public:
 private:
 
     struct net_req {
-        explicit net_req(mbuf *m) {
+        explicit net_req(mbuf *m) : mb(m) {
             memset(&mhdr, 0, sizeof(mhdr));
-            um.reset(m);
         }
+        void free_mbuf() { m_freem(mb); }
 
         struct net::net_hdr_mrg_rxbuf mhdr;
-        struct free_deleter {
-            void operator()(mbuf *m) { m_freem(m); }
-        };
-
-        std::unique_ptr<mbuf, free_deleter> um;
+        mbuf* mb;
     };
 
     std::string _driver_name;

@@ -171,6 +171,7 @@ int net::txq::xmit(mbuf* buff)
 
     if (rc == EINVAL) {
         // The packet is f...d - drop it!
+        req->free_mbuf();
         delete req;
     } else if (rc) {
         //
@@ -180,6 +181,8 @@ int net::txq::xmit(mbuf* buff)
         //
         rc = 0;
         push_cpu(buff);
+
+        delete req;
     }
 
     return rc;
@@ -782,8 +785,9 @@ void net::txq::gc()
     req = static_cast<net_req*>(vqueue->get_buf_elem(&len));
 
     while(req != nullptr) {
-
+        req->free_mbuf();
         delete req;
+
         req_cnt++;
 
         if (req_cnt >= fin_thr) {
@@ -802,7 +806,7 @@ void net::txq::gc()
 
 int net::txq::try_xmit_one_locked(net_req *req, u64& tx_bytes)
 {
-    struct mbuf *m, *m_head = req->um.get();
+    struct mbuf *m, *m_head = req->mb;
     u16 vec_sz = 0;
 
     DEBUG_ASSERT(!try_lock_running(), "RUNNING lock not taken!\n");
@@ -874,6 +878,7 @@ int net::txq::xmit_one_locked(mbuf* m_head)
     //
     rc = try_xmit_one_locked(req, tx_bytes);
     if (rc == EINVAL) {
+        req->free_mbuf();
         delete req;
 
         return rc;

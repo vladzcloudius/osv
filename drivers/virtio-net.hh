@@ -510,14 +510,13 @@ private:
          * Try to transmit a single packet. Don't block on failure.
          *
          * Must run with "running" lock taken.
-         * @param req
-         * @param tx_bytes
+         * @param m_head
          *
          * @return 0 if packet has been successfully sent, EINVAL if a packet is
          *         not well-formed and ENOBUFS if there was no room on a HW ring
          *         to send the packet.
          */
-        int try_xmit_one_locked(net_req *req, u64& tx_bytes);
+        int try_xmit_one_locked(mbuf* m_head);
 
         /**
          * Transmit a single packet. Will wait for completions if there is no
@@ -571,6 +570,19 @@ private:
          */
         std::atomic_flag running = ATOMIC_FLAG_INIT;
     private:
+        /**
+         * Try to transmit a single packet. Don't block on failure.
+         *
+         * Must run with "running" lock taken.
+         * @param req
+         * @param m_head
+         * @param tx_bytes
+         *
+         * @return 0 if packet has been successfully sent, EINVAL if a packet is
+         *         not well-formed and ENOBUFS if there was no room on a HW ring
+         *         to send the packet.
+         */
+        int try_xmit_one_locked(net_req* req, mbuf* m_head, u64& tx_bytes);
         void dispatch();
         void bh_func();
 

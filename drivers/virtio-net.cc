@@ -151,16 +151,11 @@ int net::txq::xmit(mbuf* buff)
         return 0;
     }
 
-    int rc = 0;
-    net_req *req = new net_req(buff);
-    u64 tx_bytes;
-
     // If we are here means we've aquired a RUNNING lock
-    rc = try_xmit_one_locked(req, tx_bytes);
+    int rc = try_xmit_one_locked(buff);
 
     // Alright!!!
     if (!rc) {
-        update_stats(req, tx_bytes);
         stats.tx_kicks++;
         if (vqueue->kick()) {
             stats.tx_hv_kicks++;
@@ -182,8 +177,7 @@ int net::txq::xmit(mbuf* buff)
 
     if (rc == EINVAL) {
         // The packet is f...d - drop it!
-        req->free_mbuf();
-        delete req;
+        m_freem(buff);
     } else if (rc) {
         //
         // There hasn't been enough buffers on the HW ring to send the
@@ -192,8 +186,6 @@ int net::txq::xmit(mbuf* buff)
         //
         rc = 0;
         push_cpu(buff);
-
-        delete req;
     }
 
     return rc;
@@ -805,9 +797,24 @@ void net::txq::gc()
     vqueue->get_buf_gc();
 }
 
-int net::txq::try_xmit_one_locked(net_req *req, u64& tx_bytes)
+inline int net::txq::try_xmit_one_locked(mbuf* m_head)
 {
-    struct mbuf *m, *m_head = req->mb;
+    net_req* req = new net_req(m_head);
+    u64 tx_bytes;
+    int rc = try_xmit_one_locked(req, m_head, tx_bytes);
+
+    if (rc) {
+        delete req;
+    } else {
+        update_stats(req, tx_bytes);
+    }
+
+    return rc;
+}
+
+int net::txq::try_xmit_one_locked(net_req* req, mbuf* m_head, u64& tx_bytes)
+{
+    struct mbuf *m;
     u16 vec_sz = 0;
 
     DEBUG_ASSERT(!try_lock_running(), "RUNNING lock not taken!\n");
@@ -877,7 +884,7 @@ int net::txq::xmit_one_locked(mbuf* m_head)
     //
     // In case the packet is a crap there is no other option though.
     //
-    rc = try_xmit_one_locked(req, tx_bytes);
+    rc = try_xmit_one_locked(req, m_head, tx_bytes);
     if (rc == EINVAL) {
         req->free_mbuf();
         delete req;

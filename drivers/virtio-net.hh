@@ -234,7 +234,6 @@ public:
     void receiver();
     void fill_rx_ring();
 
-    void kick(int queue) {_queues[queue]->kick();}
     static hw_driver* probe(hw_device* dev);
 
     /**

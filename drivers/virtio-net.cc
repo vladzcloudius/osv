@@ -169,6 +169,17 @@ int net::txq::xmit(mbuf* buff)
 
     unlock_running();
 
+    //
+    // We unlock_running() not from a dispatcher only if the dispatcher is not
+    // running and is waiting for either a new work or for this lock.
+    //
+    // We want to wake a dispatcher only if there is a new work for it since
+    // otherwise there is no point for it to wake up.
+    //
+    if (has_pending()) {
+        dispatcher_task.wake();
+    }
+
     if (rc == EINVAL) {
         // The packet is f...d - drop it!
         req->free_mbuf();
@@ -289,16 +300,6 @@ inline void net::txq::lock_running()
 inline void net::txq::unlock_running()
 {
     running.clear(std::memory_order_release);
-    //
-    // We unlock_running() not from a dispatcher only if the dispatcher is not
-    // running and is waiting for either a new work or for this lock.
-    //
-    // We want to wake it from this function only if there is a new work for a
-    // dispatcher since otherwise there is no point for it to wake up.
-    //
-    if ((&dispatcher_task != sched::thread::current()) && has_pending()) {
-        dispatcher_task.wake();
-    }
 }
 
 inline bool net::txq::has_pending() const

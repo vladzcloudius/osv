@@ -16,26 +16,26 @@
 
 #include <bsd/sys/sys/mbuf.h>
 
-namespace osv {
+namespace lockfree {
 
 /**
- * @struct tx_buff_desc
+ * @struct buff_desc
  *
- * A pair of packet handle and the timestamp.
+ * A pair of pointer to buffer and the timestamp.
  * Two objects are compared by their timestamps.
  */
-struct tx_buff_desc {
+struct buff_desc {
     mbuf* buf;
     s64 ts;
 
-    bool operator>(const tx_buff_desc& other) const
+    bool operator>(const buff_desc& other) const
     {
         return ts - other.ts > 0;
     }
 };
 
 /**
- * @class tx_cpu_queue
+ * @class cpu_queue
  * This class will represent a single per-CPU Tx queue.
  *
  * These queues will be subject to the merging by the nway_merger class in
@@ -48,24 +48,24 @@ struct tx_buff_desc {
  *  - erase(it), which would pop the front element
  */
 template <unsigned CpuTxqSize>
-class tx_cpu_queue {
+class cpu_queue {
 public:
-    class tx_queue_iterator;
-    typedef tx_buff_desc        T;
-    typedef tx_queue_iterator   iterator;
+    class cpu_queue_iterator;
+    typedef buff_desc        T;
+    typedef cpu_queue_iterator   iterator;
 
-    explicit tx_cpu_queue() {}
+    explicit cpu_queue() {}
 
-    class tx_queue_iterator {
+    class cpu_queue_iterator {
     public:
         const T& operator *() const { return _cpuq->front(); }
 
     private:
-        typedef tx_cpu_queue<CpuTxqSize> cpu_queue_type;
+        typedef cpu_queue<CpuTxqSize> cpu_queue_type;
 
         // We want only tx_cpu_queue to be able to create such interators.
         friend cpu_queue_type;
-        explicit tx_queue_iterator(cpu_queue_type* cpuq) : _cpuq(cpuq) { }
+        explicit cpu_queue_iterator(cpu_queue_type* cpuq) : _cpuq(cpuq) { }
         cpu_queue_type* _cpuq;
     };
 
@@ -136,7 +136,7 @@ public:
     void push_new_waiter(wait_record* wr) { _waitq.push(wr); }
 
 private:
-    lockfree::queue_mpsc<wait_record> _waitq;
+    queue_mpsc<wait_record> _waitq;
     ring_spsc<T, CpuTxqSize> _r;
 
     static const int _wakeup_threshold = CpuTxqSize / 2;
@@ -159,9 +159,9 @@ private:
 } CACHELINE_ALIGNED;
 
 template <class NetDevTxq, unsigned CpuTxqSize>
-class percpu_xmit {
+class xmitter {
 public:
-    explicit percpu_xmit(NetDevTxq* txq) :
+    explicit xmitter(NetDevTxq* txq) :
         _txq(txq),_check_empty_queues(false) {
         for (auto c : sched::cpus) {
             _cpuq.for_cpu(c)->reset(new cpu_queue_type);
@@ -303,7 +303,7 @@ private:
 
         sched::preempt_disable();
 
-        tx_buff_desc new_buff_desc = { buff, get_ts() };
+        buff_desc new_buff_desc = { buff, get_ts() };
         cpu_queue_type* local_cpuq = _cpuq->get();
 
         while (!local_cpuq->push(new_buff_desc)) {
@@ -401,7 +401,7 @@ private:
     }
 
 private:
-    typedef tx_cpu_queue<CpuTxqSize> cpu_queue_type;
+    typedef cpu_queue<CpuTxqSize> cpu_queue_type;
 
     NetDevTxq* _txq; // Rename to _dev_txq
     dynamic_percpu<std::unique_ptr<cpu_queue_type> > _cpuq;

@@ -320,7 +320,7 @@ private:
          * Push the packet downstream
          * @param tx_desc
          */
-        void operator=(const osv::tx_buff_desc& tx_desc) {
+        void operator=(const lockfree::buff_desc& tx_desc) {
             int error = _q->xmit_one_locked(tx_desc.buf);
 
             if (error) {
@@ -343,10 +343,10 @@ private:
 
         txq(net* parent, vring* vq) :
             vqueue(vq), _parent(parent), _xmit_it(this),
-            _kick_thresh(vqueue->size()), _cpu_xmit_q(this),
+            _kick_thresh(vqueue->size()), _xmitter(this),
             dispatcher_task([this] {
                 // TODO: implement a proper StopPred when we fix a SP code
-                _cpu_xmit_q.poll_until([] { return false; }, _xmit_it);
+                _xmitter.poll_until([] { return false; }, _xmit_it);
             })
         {
             //
@@ -401,7 +401,7 @@ private:
          */
         void kick();
 
-        int xmit(mbuf* m_head) { return _cpu_xmit_q.xmit(m_head); }
+        int xmit(mbuf* m_head) { return _xmitter.xmit(m_head); }
 
         /* TODO: drain the per-cpu rings in ~txq() and in if_qflush() */
 
@@ -469,7 +469,7 @@ private:
         //
         // Currently this gives us ~16 pages per one CPU ring.
         //
-        osv::percpu_xmit<txq, 4096> _cpu_xmit_q;
+        lockfree::xmitter<txq, 4096> _xmitter;
 
     public:
         sched::thread dispatcher_task; // TODO: Rename to "worker_task"

@@ -13,27 +13,13 @@
 #include <bsd/sys/net/if.h>
 #include <bsd/sys/sys/mbuf.h>
 
+#include <osv/percpu_xmit.hh>
+
 #include "drivers/virtio.hh"
 #include "drivers/pci-device.hh"
-#include "drivers/clock.hh"
-#include "osv/percpu.hh"
-#include "osv/wait_record.hh"
-#include "lockfree/ring.hh"
-#include "lockfree/queue-mpsc.hh"
-#include "nway_merger.hh"
 
-//#define TX_DEBUG
 
 namespace virtio {
-
-/**
- * This is the size of the buffers ring of the FreeBSD virtio-net
- * driver. So, we are using this as a baseline. We may ajust this value
- * later (cut it down maybe?!).
- *
- * Currently this gives us ~16 pages per one CPU ring.
- */
-const static unsigned cpu_txq_size	= 4096;
 
 /**
  * @class net
@@ -313,143 +299,6 @@ private:
         struct rxq_stats stats = { 0 };
     };
 
-    /**
-     * @struct tx_buff_desc
-     *
-     * A pair of packet handle and the timestamp.
-     * Two objects are compared by their timestamps.
-     */
-    struct tx_buff_desc {
-        mbuf* buf;
-        s64 ts;
-
-        bool operator>(const tx_buff_desc& other) const
-        {
-            return ts - other.ts > 0;
-        }
-    };
-
-    /**
-     * @class tx_cpu_queue
-     * This class will represent a single per-CPU Tx queue.
-     *
-     * These queues will be subject to the merging by the nway_merger class in
-     * order to address the reordering issue. Therefore this class will
-     * implement the following methods/classes:
-     *  - push(val)
-     *  - empty()
-     *  - front(), which will return the iterator that implements:
-     *      - operator *() to access the underlying value
-     *  - erase(it), which would pop the front element
-     */
-    class tx_cpu_queue {
-    public:
-        class tx_queue_iterator;
-        typedef tx_buff_desc        T;
-        typedef tx_queue_iterator   iterator;
-
-        explicit tx_cpu_queue() {}
-
-        class tx_queue_iterator {
-        public:
-            const T& operator *() const { return _cpuq->front(); }
-
-        private:
-            // We want only tx_cpu_queue to be able to create such interators.
-            friend class tx_cpu_queue;
-            explicit tx_queue_iterator(tx_cpu_queue* cpuq) : _cpuq(cpuq) { }
-            tx_cpu_queue* _cpuq;
-        };
-
-        /**
-         * Delete the item pointed by the given iterator and wake the next
-         * waiter if there is any.
-         *
-         * Since iterator may only point to the front element we just need to
-         * pop() the underlying ring_spsc.
-         * @param it iterator handle
-         */
-        void erase(iterator& it) {
-            T tmp = { 0 };
-            _r.pop(tmp);
-            _popped_since_wakeup++;
-
-            debug_check(tmp);
-
-            //
-            // Wake the waiters after a threshold or when the last packet has
-            // been popped.
-            // The last one is needed to ensure there won't be stuck waiters in
-            // case of a race described in net::txq::push_cpu().
-            //
-            if (_r.empty() || (_popped_since_wakeup >= _wakeup_threshold)) {
-                wake_waiters();
-            }
-        }
-
-        void wake_waiters() {
-            if (!_popped_since_wakeup) {
-                return;
-            }
-
-            //
-            // If we see the empty waiters queue we want to clear the popped
-            // packets counter in order to keep the wakeup logic consistent.
-            //
-            if (_waitq.empty()) {
-                _popped_since_wakeup = 0;
-                return;
-            }
-
-            //
-            // We need to ensure that woken thread will see the new state of the
-            // queue (after the pop()).
-            //
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-
-            for (; _popped_since_wakeup; _popped_since_wakeup--) {
-                // Wake the next waiter if there is any
-                wait_record* wr = _waitq.pop();
-                if (wr) {
-                    wr->wake();
-                } else {
-                    _popped_since_wakeup = 0;
-                    return;
-                }
-            }
-        }
-
-        // Some access/info functions
-        const T& front() const { return _r.front(); }
-        iterator begin() { return iterator(this); }
-        bool push(T v) { return _r.push(v); }
-        bool empty() const { return _r.empty(); }
-        unsigned size() const { return _r.size(); }
-        void push_new_waiter(wait_record* wr) { _waitq.push(wr); }
-
-    private:
-        lockfree::queue_mpsc<wait_record> _waitq;
-        ring_spsc<T, cpu_txq_size> _r;
-
-        static const int _wakeup_threshold = cpu_txq_size / 2;
-        int _popped_since_wakeup = 0;
-
-#ifdef TX_DEBUG
-        void debug_check(T& tmp) {
-            if (tmp.ts <= _last_ts) {
-                printf("Time went backwards: curr_ts(%d) < prev_ts(%d)\n",
-                       tmp.ts, _last_ts);
-                assert(0);
-            }
-
-            _last_ts = tmp.ts;
-        }
-        s64 _last_ts = -1;
-#else
-        void debug_check(T& tmp) {}
-#endif
-    };
-
     struct txq;
     /**
      * @class tx_xmit_iterator
@@ -471,7 +320,7 @@ private:
          * Push the packet downstream
          * @param tx_desc
          */
-        void operator=(const tx_buff_desc& tx_desc) {
+        void operator=(const osv::tx_buff_desc& tx_desc) {
             int error = _q->xmit_one_locked(tx_desc.buf);
 
             if (error) {
@@ -490,21 +339,27 @@ private:
      *  TODO: Make it a class!
      */
     struct txq {
-        txq(net* parent, vring* vq) :
-            vqueue(vq),
-            dispatcher_task([this] { dispatch(); }),
-            xmit_it(this), _check_empty_queues(false), _parent(parent)
-        {
-            for (auto c : sched::cpus) {
-                cpuq.for_cpu(c)->reset(new tx_cpu_queue);
-            }
-        };
+        friend class tx_xmit_iterator;
 
-        void wake_waiters_all() {
-            for (auto c : sched::cpus) {
-                cpuq.for_cpu(c)->get()->wake_waiters();
-            }
-        }
+        txq(net* parent, vring* vq) :
+            vqueue(vq), _parent(parent), _xmit_it(this),
+            _kick_thresh(vqueue->size()), _cpu_xmit_q(this),
+            dispatcher_task([this] {
+                // TODO: implement a proper StopPred when we fix a SP code
+                _cpu_xmit_q.poll_until([] { return false; }, _xmit_it);
+            })
+        {
+            //
+            // Kick at least every full ring of packets (see _kick_thresh
+            // above).
+            //
+            // Othersize a deadlock is possible:
+            //    1) We post a full ring of buffers without a kick().
+            //    2) We block on posting of the next buffer.
+            //    3) HW doesn't know there is a work to do.
+            //    4) Dead lock.
+            //
+        };
 
         /**
          * Try to transmit a single packet. Don't block on failure.
@@ -519,56 +374,40 @@ private:
         int try_xmit_one_locked(mbuf* m_head);
 
         /**
-         * Transmit a single packet. Will wait for completions if there is no
-         * room on a HW ring.
+         * Kick the vqueue if number of pending packets has reached the given
+         * threshold.
          *
-         * Must run with "running" lock taken.
-         * @param m_head a buffer to transmits
+         * Currently we assume that this function is called only from the
+         * dispatcher and updates some corresponding statistics.
          *
-         * @return 0 in case of success and an appropriate error code
-         *         otherwise.
+         * If the above assumtion breaks, the implementation should be updated
+         * correspondingly.
+         * @param thresh threshold
          */
-        int xmit_one_locked(mbuf *m_head);
+        void kick_pending(u16 thresh = 1);
+        void kick_pending_with_thresh() {
+            kick_pending(_kick_thresh);
+        }
 
         /**
-         * A main xmit function: will try to bypass the per-CPU queue if
-         * possible and will push the frame into that queue otherwise.
+         * Kick the underlying vring.
          *
-         * Either ways it won't block.
-         * @param buf packet descriptor to send
-         *
-         * @return 0 in case of success, EINVAL if a packet is not well-formed
-         *         and ENOBUFS if there was no room (on HW or CPU ring) to send
-         *         the packet.
+         * @return TRUE if the vring has been actually indicated.
          */
-        int xmit(mbuf *buf);
+        bool kick_hw();
 
         /**
-         * Push the packet into the per-CPU queue for the current CPU.
-         * @param buf packet descriptor to push
+         * Inform the Txq that there is a new pending work
          */
-        void push_cpu(mbuf *buf);
+        void kick();
 
-        /**
-         * Free the descriptors for the completed packets.
-         */
-        void gc();
+        int xmit(mbuf* m_head) { return _cpu_xmit_q.xmit(m_head); }
 
         /* TODO: drain the per-cpu rings in ~txq() and in if_qflush() */
 
         vring* vqueue;
         struct txq_stats stats = { 0 };
-        dynamic_percpu<std::unique_ptr<tx_cpu_queue> > cpuq;
-        sched::thread dispatcher_task;
-        sched::thread_handle new_work_hdl, running_hdl;
-        osv::nway_merger<std::list<tx_cpu_queue*> > mg;
-        tx_xmit_iterator xmit_it;
-        u16 pkts_to_kick = 0;
-        /**
-         * This lock will be used to get an exclusive control over the HW
-         * channel.
-         */
-        std::atomic_flag running = ATOMIC_FLAG_INIT;
+
     private:
         /**
          * Try to transmit a single packet. Don't block on failure.
@@ -583,19 +422,23 @@ private:
          *         to send the packet.
          */
         int try_xmit_one_locked(net_req* req, mbuf* m_head, u64& tx_bytes);
-        void dispatch();
-        void bh_func();
 
         /**
-         * Kick the vqueue if there are pending packets.
+         * Transmit a single packet. Will wait for completions if there is no
+         * room on a HW ring.
          *
-         * Currently we assume that this function is called only from the
-         * dispatcher and updates some corresponding statistics.
+         * Must run with "running" lock taken.
+         * @param m_head a buffer to transmits
          *
-         * If the above assumtion breaks, the implementation should be updated
-         * correspondingly.
+         * @return 0 in case of success and an appropriate error code
+         *         otherwise.
          */
-        void kick();
+        int xmit_one_locked(mbuf *m_head);
+
+        /**
+         * Free the descriptors for the completed packets.
+         */
+        void gc();
 
         /**
          * Update the packet handle and the net_hdr according to various offload
@@ -615,25 +458,21 @@ private:
          */
         void update_stats(net_req* req, u64 tx_bytes);
 
-        // RUNNING state controling functions
-        bool try_lock_running();
-        void lock_running();
-        void unlock_running();
-
-        // PENDING (packets) controling functions
-        bool has_pending() const;
-        bool test_and_set_pending();
-        void clear_pending();
-
-        /**
-         * @return the current timestamp
-         */
-        s64 get_ts() {
-            return clock::get()->uptime();
-        }
-
-        std::atomic<bool> _check_empty_queues;
         net* _parent;
+        tx_xmit_iterator _xmit_it;
+        const int _kick_thresh;
+        u16 _pkts_to_kick = 0;
+        //
+        // 4096 is the size of the buffers ring of the FreeBSD virtio-net
+        // driver. So, we are using this as a baseline. We may ajust this value
+        // later (cut it down maybe?!).
+        //
+        // Currently this gives us ~16 pages per one CPU ring.
+        //
+        osv::percpu_xmit<txq, 4096> _cpu_xmit_q;
+
+    public:
+        sched::thread dispatcher_task; // TODO: Rename to "worker_task"
     };
 
     /**

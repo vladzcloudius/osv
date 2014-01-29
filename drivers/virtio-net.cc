@@ -42,6 +42,8 @@
 #include <bsd/sys/netinet/udp.h>
 #include <bsd/sys/netinet/tcp.h>
 
+//#define TX_DEBUG
+
 TRACEPOINT(trace_virtio_net_rx_packet, "if=%d, len=%d", int, int);
 TRACEPOINT(trace_virtio_net_rx_wake, "");
 TRACEPOINT(trace_virtio_net_fill_rx_ring, "if=%d", int);
@@ -136,240 +138,27 @@ int net::xmit(struct mbuf* buff)
     return _txq.xmit(buff);
 }
 
-int net::txq::xmit(mbuf* buff)
+inline bool net::txq::kick_hw()
 {
-    //
-    // If there are pending packets (in the per-CPU queues) or we've failed to
-    // take a RUNNING lock push the packet in the per-CPU queue.
-    //
-    // Otherwise means that a dispatcher is neither running nor is
-    // scheduled to run. In this case bypass per-CPU queues and transmit
-    // in-place.
-    //
-    if (has_pending() || !try_lock_running()) {
-        push_cpu(buff);
-        return 0;
-    }
-
-    // If we are here means we've aquired a RUNNING lock
-    int rc = try_xmit_one_locked(buff);
-
-    // Alright!!!
-    if (!rc) {
-        stats.tx_kicks++;
-        if (vqueue->kick()) {
-            stats.tx_hv_kicks++;
-        }
-    }
-
-    unlock_running();
-
-    //
-    // We unlock_running() not from a dispatcher only if the dispatcher is not
-    // running and is waiting for either a new work or for this lock.
-    //
-    // We want to wake a dispatcher only if there is a new work for it since
-    // otherwise there is no point for it to wake up.
-    //
-    if (has_pending()) {
-        dispatcher_task.wake();
-    }
-
-    if (rc == EINVAL) {
-        // The packet is f...d - drop it!
-        m_freem(buff);
-    } else if (rc) {
-        //
-        // There hasn't been enough buffers on the HW ring to send the
-        // packet - push it into the per-CPU queue, dispatcher will handle
-        // it later.
-        //
-        rc = 0;
-        push_cpu(buff);
-    }
-
-    return rc;
+    return vqueue->kick();
 }
 
-void net::txq::push_cpu(mbuf* buff)
+inline void net::txq::kick_pending(u16 thresh)
 {
-    bool success = false;
-
-    sched::preempt_disable();
-
-    tx_buff_desc new_buff_desc = { buff, get_ts() };
-    tx_cpu_queue* local_cpuq = cpuq->get();
-
-    while (!local_cpuq->push(new_buff_desc)) {
-        wait_record wr(sched::thread::current());
-        local_cpuq->push_new_waiter(&wr);
-
-        //
-        // Try to push again in order to resolve a nasty race:
-        //
-        // If dispatcher has succeeded to empty the whole ring before to added
-        // our record to the waitq then without this push() we could have stuck
-        // until somebody else adds another packet to this specific cpuq. In
-        // this case adding a packet will ensure that dispatcher eventually
-        // handles it and "wake()s" us up.
-        //
-        // If we fail to add the packet here then this means that the queue has
-        // still been full AFTER we added the wait_record and we need to wait
-        // until dispatcher cleans it up and wakes us.
-        //
-        // All this is because we can't exit this function until dispatcher
-        // pop()s our wait_record since it's allocated on our stack.
-        //
-        success = local_cpuq->push(new_buff_desc);
-        if (success && !test_and_set_pending()) {
-            dispatcher_task.wake();
-        }
-
-        sched::preempt_enable();
-
-        wr.wait();
-
-        // we are done - get out!
-        if (success) {
-            return;
-        }
-
-        sched::preempt_disable();
-
-        // Refresh: we could have been moved to a different CPU
-        local_cpuq = cpuq->get();
-        //
-        // Refresh: another thread could have pushed its packet before us and it
-        //          had an earlier timestamp - we have to keep the timestampes
-        //          ordered in the CPU queue.
-        //
-        new_buff_desc.ts = get_ts();
-    }
-
-    //
-    // Save the IPI sending (when dispatcher sleeps for an interrupt) and
-    // exchange in the wake_impl() by paying a price of an exchange operation
-    // here.
-    //
-    if (!test_and_set_pending()) {
-        dispatcher_task.wake();
-    }
-
-    sched::preempt_enable();
-
-    return;
-}
-
-inline void net::txq::kick()
-{
-    if (pkts_to_kick) {
-        stats.tx_pkts_from_disp += pkts_to_kick;
-        pkts_to_kick = 0;
+    if (_pkts_to_kick >= thresh) {
+        stats.tx_pkts_from_disp += _pkts_to_kick;
+        _pkts_to_kick = 0;
         stats.tx_kicks++;
-        if (vqueue->kick()) {
+        if (kick_hw()) {
             stats.tx_hv_kicks++;
         }
     }
 }
 
-inline bool net::txq::try_lock_running()
-{
-    return !running.test_and_set(std::memory_order_acquire);
-
+inline void net::txq::kick() {
+    dispatcher_task.wake();
 }
 
-inline void net::txq::lock_running()
-{
-    //
-    // Check if there is no fast-transmit hook running already.
-    // If yes - sleep until it ends.
-    //
-    if (!try_lock_running()) {
-        sched::thread::wait_until([this] { return try_lock_running(); });
-    }
-}
-
-inline void net::txq::unlock_running()
-{
-    running.clear(std::memory_order_release);
-}
-
-inline bool net::txq::has_pending() const
-{
-    return _check_empty_queues.load(std::memory_order_acquire);
-}
-
-inline bool net::txq::test_and_set_pending()
-{
-    return _check_empty_queues.exchange(true, std::memory_order_acq_rel);
-}
-
-inline void net::txq::clear_pending()
-{
-    _check_empty_queues.store(false, std::memory_order_release);
-}
-
-void net::txq::dispatch()
-{
-    //
-    // Kick at least every full ring of packets.
-    // Othersize a deadlock is possible:
-    //   1) We post a full ring of buffers without a kick().
-    //   2) We block on posting of the next buffer.
-    //   3) HW doesn't know there is a work to do.
-    //   4) Dead lock.
-    //
-    const int kick_thresh = vqueue->size();
-
-    // Create a collection of a per-CPU queues
-    std::list<tx_cpu_queue*> all_cpuqs;
-
-    for (auto c : sched::cpus) {
-        all_cpuqs.push_back(cpuq.for_cpu(c)->get());
-    }
-
-    // Push them all into the heap
-    mg.create_heap(all_cpuqs);
-
-    //
-    // Dispatcher holds the RUNNING lock all the time it doesn't sleep waiting
-    // for a new work.
-    //
-    lock_running();
-
-    // Start taking packets one-by-one and send them out
-    while (1) {
-        //
-        // Reset the PENDING state.
-        //
-        // The producer thread will first add a new element to the heap and only
-        // then set the PENDING state.
-        //
-        clear_pending();
-
-        // Check if there are elements in the heap
-        if (!mg.pop(xmit_it)) {
-            // Wake all unwoken waiters before going to sleep
-            wake_waiters_all();
-
-            // We are going to sleep - release the HW channel
-            unlock_running();
-
-            sched::thread::wait_until([this] { return has_pending(); });
-            stats.tx_disp_wakeups++;
-
-            lock_running();
-        }
-
-        while (mg.pop(xmit_it)) {
-            if (pkts_to_kick >= kick_thresh) {
-                kick();
-            }
-        }
-
-        kick();
-    }
-}
 
 static void if_init(void* xsc)
 {
@@ -913,7 +702,7 @@ int net::txq::xmit_one_locked(mbuf* m_head)
     // It was a good packet - increase the counter of a "pending for a kick"
     // packets.
     //
-    pkts_to_kick++;
+    _pkts_to_kick++;
 
     return 0;
 }

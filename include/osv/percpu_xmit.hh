@@ -16,7 +16,7 @@
 
 #include <bsd/sys/sys/mbuf.h>
 
-namespace lockfree {
+namespace osv {
 
 /**
  * @struct buff_desc
@@ -25,8 +25,8 @@ namespace lockfree {
  * Two objects are compared by their timestamps.
  */
 struct buff_desc {
-    mbuf* buf;
     s64 ts;
+    mbuf* buf;
 
     bool operator>(const buff_desc& other) const
     {
@@ -58,7 +58,7 @@ public:
 
     class cpu_queue_iterator {
     public:
-        const T& operator *() const { return _cpuq->front(); }
+        mbuf* operator*() const { return _cpuq->front().buf; }
 
     private:
         typedef cpu_queue<CpuTxqSize> cpu_queue_type;
@@ -136,7 +136,7 @@ public:
     void push_new_waiter(wait_record* wr) { _waitq.push(wr); }
 
 private:
-    queue_mpsc<wait_record> _waitq;
+    lockfree::queue_mpsc<wait_record> _waitq;
     ring_spsc<T, CpuTxqSize> _r;
 
     static const int _wakeup_threshold = CpuTxqSize / 2;
@@ -303,7 +303,7 @@ private:
 
         sched::preempt_disable();
 
-        buff_desc new_buff_desc = { buff, get_ts() };
+        buff_desc new_buff_desc = { get_ts(), buff };
         cpu_queue_type* local_cpuq = _cpuq->get();
 
         while (!local_cpuq->push(new_buff_desc)) {

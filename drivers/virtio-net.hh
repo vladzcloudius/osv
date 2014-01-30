@@ -320,8 +320,8 @@ private:
          * Push the packet downstream
          * @param tx_desc
          */
-        void operator=(const lockfree::buff_desc& tx_desc) {
-            int error = _q->xmit_one_locked(tx_desc.buf);
+        void operator=(mbuf* m_head) {
+            int error = _q->xmit_one_locked(m_head);
 
             if (error) {
                 // Hmmm... Bad packet?!
@@ -469,7 +469,7 @@ private:
         //
         // Currently this gives us ~16 pages per one CPU ring.
         //
-        lockfree::xmitter<txq, 4096> _xmitter;
+        osv::xmitter<txq, 4096> _xmitter;
 
     public:
         sched::thread dispatcher_task; // TODO: Rename to "worker_task"

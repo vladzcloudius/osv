@@ -320,13 +320,8 @@ private:
          * Push the packet downstream
          * @param tx_desc
          */
-        void operator=(mbuf* m_head) {
-            int error = _q->xmit_one_locked(m_head);
-
-            if (error) {
-                // Hmmm... Bad packet?!
-                assert(0);
-            }
+        void operator=(const osv::tx_buff_desc& buff_desc) {
+            _q->xmit_one_locked(buff_desc);
         }
     private:
         txq* _q;
@@ -362,16 +357,29 @@ private:
         };
 
         /**
+         * Checks the packet, prepares the net_req (returned in a "cooky") and
+         * calculates the number of bytes.
+         * @param m_head
+         * @param cooky
+         * @param tx_bytes
+         *
+         * @return 0 if packet is ok and EINVAL if it's not well-formed.
+         */
+        int xmit_prep(mbuf* m_head, void*& cooky, u64& tx_bytes);
+
+        /**
          * Try to transmit a single packet. Don't block on failure.
          *
          * Must run with "running" lock taken.
+         * In case of a success this function will update Tx statistics.
          * @param m_head
+         * @param cooky Cooky returned by xmit_prep().
+         * @param tx_bytes
          *
-         * @return 0 if packet has been successfully sent, EINVAL if a packet is
-         *         not well-formed and ENOBUFS if there was no room on a HW ring
-         *         to send the packet.
+         * @return 0 if packet has been successfully sent and ENOBUFS if there
+         *         was no room on a HW ring to send the packet.
          */
-        int try_xmit_one_locked(mbuf* m_head);
+        int try_xmit_one_locked(mbuf* m_head, void* cooky, u64 tx_bytes);
 
         /**
          * Kick the vqueue if number of pending packets has reached the given
@@ -399,7 +407,7 @@ private:
         /**
          * Inform the Txq that there is a new pending work
          */
-        void kick();
+        void wake_worker();
 
         int xmit(mbuf* m_head) { return _xmitter.xmit(m_head); }
 
@@ -410,30 +418,29 @@ private:
 
     private:
         /**
-         * Try to transmit a single packet. Don't block on failure.
-         *
-         * Must run with "running" lock taken.
-         * @param req
+         * This is a private version of try_xmit_one_locked() that acually does
+         * the work.
+         * This function won't update Tx statistics, the caller should do it
+         * after the packet is actually sent.
          * @param m_head
-         * @param tx_bytes
+         * @param req
          *
          * @return 0 if packet has been successfully sent, EINVAL if a packet is
          *         not well-formed and ENOBUFS if there was no room on a HW ring
          *         to send the packet.
          */
-        int try_xmit_one_locked(net_req* req, mbuf* m_head, u64& tx_bytes);
+        int try_xmit_one_locked(mbuf* m_head, net_req* req);
 
         /**
          * Transmit a single packet. Will wait for completions if there is no
          * room on a HW ring.
          *
          * Must run with "running" lock taken.
-         * @param m_head a buffer to transmits
-         *
-         * @return 0 in case of success and an appropriate error code
-         *         otherwise.
+         * @param m_head
+         * @param req
+         * @param tx_bytes
          */
-        int xmit_one_locked(mbuf *m_head);
+        void xmit_one_locked(const osv::tx_buff_desc& buff_desc);
 
         /**
          * Free the descriptors for the completed packets.

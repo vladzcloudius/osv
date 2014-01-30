@@ -155,7 +155,7 @@ inline void net::txq::kick_pending(u16 thresh)
     }
 }
 
-inline void net::txq::kick() {
+inline void net::txq::wake_worker() {
     dispatcher_task.wake();
 }
 
@@ -586,28 +586,31 @@ void net::txq::gc()
     vqueue->get_buf_gc();
 }
 
-inline int net::txq::try_xmit_one_locked(mbuf* m_head)
+inline int net::txq::try_xmit_one_locked(mbuf* m_head, void* _req, u64 tx_bytes)
 {
-    net_req* req = new net_req(m_head);
-    u64 tx_bytes;
-    int rc = try_xmit_one_locked(req, m_head, tx_bytes);
+    net_req* req = static_cast<net_req*>(_req);
+    int rc = try_xmit_one_locked(m_head, req);
 
     if (rc) {
-        delete req;
-    } else {
-        update_stats(req, tx_bytes);
+        return rc;
     }
 
-    return rc;
+    update_stats(req, tx_bytes);
+    return 0;
 }
-
-int net::txq::try_xmit_one_locked(net_req* req, mbuf* m_head, u64& tx_bytes)
+/**
+ * Check the packet, prepare the net_req and calculate the number of bytes
+ * @param m_head
+ * @param req
+ * @param tx_bytes
+ *
+ * @return
+ */
+int net::txq::xmit_prep(mbuf* m_head, void*& cooky, u64& tx_bytes)
 {
-    struct mbuf *m;
-    u16 vec_sz = 0;
+    net_req* req = new net_req(m_head);
+    mbuf* m;
 
-    DEBUG_ASSERT(!try_lock_running(), "RUNNING lock not taken!\n");
-    
     tx_bytes = 0;
 
     if (m_head->M_dat.MH.MH_pkthdr.csum_flags != 0) {
@@ -615,8 +618,43 @@ int net::txq::try_xmit_one_locked(net_req* req, mbuf* m_head, u64& tx_bytes)
         if ((m_head = m) == nullptr) {
             stats.tx_err++;
 
+            delete req;
+
             /* The buffer is not well-formed */
             return EINVAL;
+        }
+    }
+
+    // After this point the packet is promissed to be sent
+    for (m = m_head; m != NULL; m = m->m_hdr.mh_next) {
+        int frag_len = m->m_hdr.mh_len;
+
+        if (frag_len != 0) {
+            net_d("Frag len=%d:", frag_len);
+            req->mhdr.num_buffers++;
+            tx_bytes += frag_len;
+        }
+    }
+
+    cooky = req;
+    return 0;
+}
+
+int net::txq::try_xmit_one_locked(mbuf* m_head, net_req* req)
+{
+    mbuf *m;
+    u16 vec_sz = req->mhdr.num_buffers + 1;
+
+    DEBUG_ASSERT(!try_lock_running(), "RUNNING lock not taken!\n");
+
+    if (!vqueue->avail_ring_has_room(vec_sz)) {
+        if (vqueue->used_ring_not_empty()) {
+            gc();
+            if (!vqueue->avail_ring_has_room(vec_sz)) {
+                return ENOBUFS;
+            }
+        } else {
+            return ENOBUFS;
         }
     }
 
@@ -624,25 +662,13 @@ int net::txq::try_xmit_one_locked(net_req* req, mbuf* m_head, u64& tx_bytes)
     vqueue->add_out_sg(static_cast<void*>(&req->mhdr), _parent->_hdr_size);
 
     for (m = m_head; m != NULL; m = m->m_hdr.mh_next) {
-        int frag_len = m->m_hdr.mh_len;
-
-        if (frag_len != 0) {
-            net_d("Frag len=%d:", frag_len);
-            req->mhdr.num_buffers++;
-
+        if (m->m_hdr.mh_len) {
             vqueue->add_out_sg(m->m_hdr.mh_data, m->m_hdr.mh_len);
-            tx_bytes += frag_len;
         }
     }
 
-    vec_sz = vqueue->_sg_vec.size();
-
-    if (!vqueue->avail_ring_has_room(vec_sz) && vqueue->used_ring_not_empty()) {
-        gc();
-    }
-
     if (!vqueue->add_buf(req)) {
-        return ENOBUFS;
+        assert(0);
     }
 
     return 0;
@@ -661,50 +687,29 @@ inline void net::txq::update_stats(net_req* req, u64 tx_bytes)
 }
 
 
-int net::txq::xmit_one_locked(mbuf* m_head)
+void net::txq::xmit_one_locked(const osv::tx_buff_desc& buff_desc)
 {
-    net_req *req = new net_req(m_head);
-    int rc = 0;
-    u64 tx_bytes = 0;
+    mbuf* m_head = buff_desc.buf;
+    net_req* req = static_cast<net_req*>(buff_desc.cooky);
 
-    //
-    // Transmit the packet: don't drop, there is no way to inform the upper
-    // layer about this at this stage.
-    //
-    // In case the packet is a crap there is no other option though.
-    //
-    rc = try_xmit_one_locked(req, m_head, tx_bytes);
-    if (rc == EINVAL) {
-        req->free_mbuf();
-        delete req;
-
-        return rc;
-    }
-
-    // We had no HW buffers - wait for completion
-    if (rc) {
+    while (try_xmit_one_locked(m_head, req)) {
         // We are going to sleep - kick() the pending packets
-        kick();
+        kick_pending();
 
-        do  {
-            _parent->virtio_driver::wait_for_queue(vqueue,
-                                                   &vring::used_ring_not_empty);
-            gc();
-        } while (!vqueue->add_buf(req));
+        _parent->virtio_driver::wait_for_queue(vqueue,
+                                               &vring::used_ring_not_empty);
     }
 
     trace_virtio_net_tx_packet(_parent->_ifn->if_index, vqueue->_sg_vec.size());
 
     // Update the statistics
-    update_stats(req, tx_bytes);
+    update_stats(req, buff_desc.tx_bytes);
 
     //
     // It was a good packet - increase the counter of a "pending for a kick"
     // packets.
     //
     _pkts_to_kick++;
-
-    return 0;
 }
 
 mbuf* net::txq::offload(mbuf* m, net_hdr* hdr)

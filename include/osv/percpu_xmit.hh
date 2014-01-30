@@ -19,16 +19,18 @@
 namespace osv {
 
 /**
- * @struct buff_desc
+ * @struct tx_buff_desc
  *
  * A pair of pointer to buffer and the timestamp.
  * Two objects are compared by their timestamps.
  */
-struct buff_desc {
+struct tx_buff_desc {
     s64 ts;
     mbuf* buf;
+    void* cooky;
+    u64 tx_bytes;
 
-    bool operator>(const buff_desc& other) const
+    bool operator>(const tx_buff_desc& other) const
     {
         return ts - other.ts > 0;
     }
@@ -51,14 +53,14 @@ template <unsigned CpuTxqSize>
 class cpu_queue {
 public:
     class cpu_queue_iterator;
-    typedef buff_desc        T;
     typedef cpu_queue_iterator   iterator;
+    typedef tx_buff_desc         T;
 
     explicit cpu_queue() {}
 
     class cpu_queue_iterator {
     public:
-        mbuf* operator*() const { return _cpuq->front().buf; }
+        const T& operator*() const { return _cpuq->front(); }
 
     private:
         typedef cpu_queue<CpuTxqSize> cpu_queue_type;
@@ -180,6 +182,18 @@ public:
      *         the packet.
      */
     int xmit(mbuf* buff) {
+
+        void* cooky = nullptr;
+        u64 tx_bytes;
+        int rc = _txq->xmit_prep(buff, cooky, tx_bytes);
+
+        if (rc == EINVAL) {
+            m_freem(buff);
+            return rc;
+        }
+
+        assert(cooky != nullptr);
+
         //
         // If there are pending packets (in the per-CPU queues) or we've failed
         // to take a RUNNING lock push the packet in the per-CPU queue.
@@ -189,12 +203,12 @@ public:
         // in-place.
         //
         if (has_pending() || !try_lock_running()) {
-            push_cpu(buff);
+            push_cpu(buff, cooky, tx_bytes);
             return 0;
         }
 
         // If we are here means we've aquired a RUNNING lock
-        int rc = _txq->try_xmit_one_locked(buff);
+        rc = _txq->try_xmit_one_locked(buff, cooky, tx_bytes);
 
         // Alright!!!
         if (!rc) {
@@ -214,23 +228,19 @@ public:
         // otherwise there is no point for it to wake up.
         //
         if (has_pending()) {
-            _txq->kick();
+            _txq->wake_worker();
         }
 
-        if (rc == EINVAL) {
-            // The packet is f...d - drop it!
-            m_freem(buff);
-        } else if (rc) {
+        if (rc /* == ENOBUFS */) {
             //
             // There hasn't been enough buffers on the HW ring to send the
             // packet - push it into the per-CPU queue, dispatcher will handle
             // it later.
             //
-            rc = 0;
-            push_cpu(buff);
+            push_cpu(buff, cooky, tx_bytes);
         }
 
-        return rc;
+        return 0;
     }
 
     template <class StopPollingPred, class XmitIterator>
@@ -298,12 +308,12 @@ private:
      * Push the packet into the per-CPU queue for the current CPU.
      * @param buf packet descriptor to push
      */
-    void push_cpu(mbuf* buff) {
+    void push_cpu(mbuf* buff, void* cooky, u64 tx_bytes) {
         bool success = false;
 
         sched::preempt_disable();
 
-        buff_desc new_buff_desc = { get_ts(), buff };
+        tx_buff_desc new_buff_desc = { get_ts(), buff, cooky, tx_bytes };
         cpu_queue_type* local_cpuq = _cpuq->get();
 
         while (!local_cpuq->push(new_buff_desc)) {
@@ -328,7 +338,7 @@ private:
             //
             success = local_cpuq->push(new_buff_desc);
             if (success && !test_and_set_pending()) {
-                _txq->kick();
+                _txq->wake_worker();
             }
 
             sched::preempt_enable();
@@ -358,7 +368,7 @@ private:
         // operation here.
         //
         if (!test_and_set_pending()) {
-            _txq->kick();
+            _txq->wake_worker();
         }
 
         sched::preempt_enable();

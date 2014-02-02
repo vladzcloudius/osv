@@ -19,22 +19,6 @@
 namespace osv {
 
 /**
- * @struct tx_buff_desc
- *
- * A pair of pointer to buffer and the timestamp.
- * Two objects are compared by their timestamps.
- */
-struct tx_buff_desc {
-    s64 ts;
-    void* cooky;
-
-    bool operator>(const tx_buff_desc& other) const
-    {
-        return ts - other.ts > 0;
-    }
-};
-
-/**
  * @class cpu_queue
  * This class will represent a single per-CPU Tx queue.
  *
@@ -50,9 +34,25 @@ struct tx_buff_desc {
 template <unsigned CpuTxqSize>
 class cpu_queue {
 public:
+    /**
+     * @struct buff_desc
+     *
+     * A pair of pointer to buffer and the timestamp.
+     * Two objects are compared by their timestamps.
+     */
+    struct buff_desc {
+        s64 ts;
+        void* cooky;
+
+        bool operator>(const buff_desc& other) const
+        {
+            return ts - other.ts > 0;
+        }
+    };
+
     class cpu_queue_iterator;
     typedef cpu_queue_iterator   iterator;
-    typedef tx_buff_desc         T;
+    typedef buff_desc            value_type;
 
     explicit cpu_queue() {}
 
@@ -78,7 +78,7 @@ public:
      * @param it iterator handle
      */
     void erase(iterator& it) {
-        T tmp = { 0 };
+        value_type tmp = { 0 };
         _r.pop(tmp);
         _popped_since_wakeup++;
 
@@ -128,22 +128,22 @@ public:
     }
 
     // Some access/info functions
-    const T& front() const { return _r.front(); }
+    const value_type& front() const { return _r.front(); }
     iterator begin() { return iterator(this); }
-    bool push(T v) { return _r.push(v); }
+    bool push(value_type v) { return _r.push(v); }
     bool empty() const { return _r.empty(); }
     unsigned size() const { return _r.size(); }
     void push_new_waiter(wait_record* wr) { _waitq.push(wr); }
 
 private:
     lockfree::queue_mpsc<wait_record> _waitq;
-    ring_spsc<T, CpuTxqSize> _r;
+    ring_spsc<value_type, CpuTxqSize> _r;
 
     static const int _wakeup_threshold = CpuTxqSize / 2;
     int _popped_since_wakeup = 0;
 
 #ifdef TX_DEBUG
-    void debug_check(T& tmp) {
+    void debug_check(value_type& tmp) {
         if (tmp.ts <= _last_ts) {
             printf("Time went backwards: curr_ts(%d) < prev_ts(%d)\n",
                    tmp.ts, _last_ts);
@@ -154,7 +154,7 @@ private:
     }
     s64 _last_ts = -1;
 #else
-    void debug_check(T& tmp) {}
+    void debug_check(value_type& tmp) {}
 #endif
 } CACHELINE_ALIGNED;
 
@@ -319,8 +319,8 @@ private:
 
         sched::preempt_disable();
 
-        tx_buff_desc new_buff_desc = { get_ts(), cooky };
         cpu_queue_type* local_cpuq = _cpuq->get();
+        typename cpu_queue_type::value_type new_buff_desc = { get_ts(), cooky };
 
         while (!local_cpuq->push(new_buff_desc)) {
             wait_record wr(sched::thread::current());

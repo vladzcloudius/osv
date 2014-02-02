@@ -249,6 +249,7 @@ private:
 
         struct net::net_hdr_mrg_rxbuf mhdr;
         mbuf* mb;
+        u64 tx_bytes;
     };
 
     std::string _driver_name;
@@ -320,8 +321,8 @@ private:
          * Push the packet downstream
          * @param tx_desc
          */
-        void operator=(const osv::tx_buff_desc& buff_desc) {
-            _q->xmit_one_locked(buff_desc);
+        void operator=(void* cooky) {
+            _q->xmit_one_locked(cooky);
         }
     private:
         txq* _q;
@@ -357,15 +358,13 @@ private:
         };
 
         /**
-         * Checks the packet, prepares the net_req (returned in a "cooky") and
-         * calculates the number of bytes.
+         * Checks the packet and returns the net_req (returned in a "cooky")
          * @param m_head
          * @param cooky
-         * @param tx_bytes
          *
          * @return 0 if packet is ok and EINVAL if it's not well-formed.
          */
-        int xmit_prep(mbuf* m_head, void*& cooky, u64& tx_bytes);
+        int xmit_prep(mbuf* m_head, void*& cooky);
 
         /**
          * Try to transmit a single packet. Don't block on failure.
@@ -379,7 +378,7 @@ private:
          * @return 0 if packet has been successfully sent and ENOBUFS if there
          *         was no room on a HW ring to send the packet.
          */
-        int try_xmit_one_locked(mbuf* m_head, void* cooky, u64 tx_bytes);
+        int try_xmit_one_locked(void* cooky);
 
         /**
          * Kick the vqueue if number of pending packets has reached the given
@@ -429,18 +428,16 @@ private:
          *         not well-formed and ENOBUFS if there was no room on a HW ring
          *         to send the packet.
          */
-        int try_xmit_one_locked(mbuf* m_head, net_req* req);
+        int try_xmit_one_locked(net_req* req);
 
         /**
          * Transmit a single packet. Will wait for completions if there is no
          * room on a HW ring.
          *
          * Must run with "running" lock taken.
-         * @param m_head
-         * @param req
-         * @param tx_bytes
+         * @param req Tx request handle
          */
-        void xmit_one_locked(const osv::tx_buff_desc& buff_desc);
+        void xmit_one_locked(void* req);
 
         /**
          * Free the descriptors for the completed packets.
@@ -461,9 +458,8 @@ private:
         /**
          * Update Tx stats for a single packet in case of a successful xmit.
          * @param req Appropriate net_req for this packet (we need its mhdr)
-         * @param tx_bytes Number of bytes in this packet
          */
-        void update_stats(net_req* req, u64 tx_bytes);
+        void update_stats(net_req* req);
 
         net* _parent;
         tx_xmit_iterator _xmit_it;

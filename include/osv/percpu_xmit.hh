@@ -26,9 +26,7 @@ namespace osv {
  */
 struct tx_buff_desc {
     s64 ts;
-    mbuf* buf;
     void* cooky;
-    u64 tx_bytes;
 
     bool operator>(const tx_buff_desc& other) const
     {
@@ -60,7 +58,7 @@ public:
 
     class cpu_queue_iterator {
     public:
-        const T& operator*() const { return _cpuq->front(); }
+        void* operator*() const { return _cpuq->front().cooky; }
 
     private:
         typedef cpu_queue<CpuTxqSize> cpu_queue_type;
@@ -184,8 +182,7 @@ public:
     int xmit(mbuf* buff) {
 
         void* cooky = nullptr;
-        u64 tx_bytes;
-        int rc = _txq->xmit_prep(buff, cooky, tx_bytes);
+        int rc = _txq->xmit_prep(buff, cooky);
 
         if (rc == EINVAL) {
             m_freem(buff);
@@ -203,12 +200,12 @@ public:
         // in-place.
         //
         if (has_pending_weak() || !try_lock_running()) {
-            push_cpu(buff, cooky, tx_bytes);
+            push_cpu(cooky);
             return 0;
         }
 
         // If we are here means we've aquired a RUNNING lock
-        rc = _txq->try_xmit_one_locked(buff, cooky, tx_bytes);
+        rc = _txq->try_xmit_one_locked(cooky);
 
         // Alright!!!
         if (!rc) {
@@ -241,7 +238,7 @@ public:
             // packet - push it into the per-CPU queue, dispatcher will handle
             // it later.
             //
-            push_cpu(buff, cooky, tx_bytes);
+            push_cpu(cooky);
         }
 
         return 0;
@@ -317,12 +314,12 @@ private:
      * Push the packet into the per-CPU queue for the current CPU.
      * @param buf packet descriptor to push
      */
-    void push_cpu(mbuf* buff, void* cooky, u64 tx_bytes) {
+    void push_cpu(void* cooky) {
         bool success = false;
 
         sched::preempt_disable();
 
-        tx_buff_desc new_buff_desc = { get_ts(), buff, cooky, tx_bytes };
+        tx_buff_desc new_buff_desc = { get_ts(), cooky };
         cpu_queue_type* local_cpuq = _cpuq->get();
 
         while (!local_cpuq->push(new_buff_desc)) {

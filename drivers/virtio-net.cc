@@ -586,16 +586,16 @@ void net::txq::gc()
     vqueue->get_buf_gc();
 }
 
-inline int net::txq::try_xmit_one_locked(mbuf* m_head, void* _req, u64 tx_bytes)
+inline int net::txq::try_xmit_one_locked(void* _req)
 {
     net_req* req = static_cast<net_req*>(_req);
-    int rc = try_xmit_one_locked(m_head, req);
+    int rc = try_xmit_one_locked(req);
 
     if (rc) {
         return rc;
     }
 
-    update_stats(req, tx_bytes);
+    update_stats(req);
     return 0;
 }
 /**
@@ -606,12 +606,11 @@ inline int net::txq::try_xmit_one_locked(mbuf* m_head, void* _req, u64 tx_bytes)
  *
  * @return
  */
-int net::txq::xmit_prep(mbuf* m_head, void*& cooky, u64& tx_bytes)
+int net::txq::xmit_prep(mbuf* m_head, void*& cooky)
 {
     net_req* req = new net_req(m_head);
     mbuf* m;
-
-    tx_bytes = 0;
+    u64 tx_bytes = 0;
 
     if (m_head->M_dat.MH.MH_pkthdr.csum_flags != 0) {
         m = offload(m_head, &req->mhdr.hdr);
@@ -636,13 +635,15 @@ int net::txq::xmit_prep(mbuf* m_head, void*& cooky, u64& tx_bytes)
         }
     }
 
+    req->tx_bytes = tx_bytes;
+
     cooky = req;
     return 0;
 }
 
-int net::txq::try_xmit_one_locked(mbuf* m_head, net_req* req)
+int net::txq::try_xmit_one_locked(net_req* req)
 {
-    mbuf *m;
+    mbuf *m_head = req->mb, *m;
     u16 vec_sz = req->mhdr.num_buffers + 1;
 
     DEBUG_ASSERT(!try_lock_running(), "RUNNING lock not taken!\n");
@@ -674,9 +675,9 @@ int net::txq::try_xmit_one_locked(mbuf* m_head, net_req* req)
     return 0;
 }
 
-inline void net::txq::update_stats(net_req* req, u64 tx_bytes)
+inline void net::txq::update_stats(net_req* req)
 {
-    stats.tx_bytes += tx_bytes;
+    stats.tx_bytes += req->tx_bytes;
     stats.tx_packets++;
 
     if (req->mhdr.hdr.flags & net_hdr::VIRTIO_NET_HDR_F_NEEDS_CSUM)
@@ -687,12 +688,11 @@ inline void net::txq::update_stats(net_req* req, u64 tx_bytes)
 }
 
 
-void net::txq::xmit_one_locked(const osv::tx_buff_desc& buff_desc)
+void net::txq::xmit_one_locked(void* _req)
 {
-    mbuf* m_head = buff_desc.buf;
-    net_req* req = static_cast<net_req*>(buff_desc.cooky);
+    net_req* req = static_cast<net_req*>(_req);
 
-    while (try_xmit_one_locked(m_head, req)) {
+    while (try_xmit_one_locked(req)) {
         // We are going to sleep - kick() the pending packets
         kick_pending();
 
@@ -703,7 +703,7 @@ void net::txq::xmit_one_locked(const osv::tx_buff_desc& buff_desc)
     trace_virtio_net_tx_packet(_parent->_ifn->if_index, vqueue->_sg_vec.size());
 
     // Update the statistics
-    update_stats(req, buff_desc.tx_bytes);
+    update_stats(req);
 
     //
     // It was a good packet - increase the counter of a "pending for a kick"

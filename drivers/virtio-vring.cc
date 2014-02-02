@@ -224,17 +224,6 @@ namespace virtio {
             return cookie;
     }
 
-
-    void vring::get_buf_finalize(u16 delta)
-    {
-            _used_ring_host_head += delta;
-
-            // only let the host know about our used idx in case irq are enabled
-            if (_avail->interrupt_on())
-                set_used_event(_used_ring_host_head, std::memory_order_release);
-    }
-
-
     bool vring::avail_ring_not_empty()
     {
         u16 effective_avail_count = _avail_count + (_used_ring_host_head - _used_ring_guest_head);

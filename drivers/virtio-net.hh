@@ -245,7 +245,6 @@ private:
         explicit net_req(mbuf *m) : mb(m) {
             memset(&mhdr, 0, sizeof(mhdr));
         }
-        void free_mbuf() { m_freem(mb); }
 
         struct net::net_hdr_mrg_rxbuf mhdr;
         mbuf* mb;

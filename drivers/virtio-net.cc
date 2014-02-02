@@ -567,20 +567,23 @@ void net::txq::gc()
     req = static_cast<net_req*>(vqueue->get_buf_elem(&len));
 
     while(req != nullptr) {
-        req->free_mbuf();
+        m_freem(req->mb);
         delete req;
 
         req_cnt++;
 
         if (req_cnt >= fin_thr) {
-            vqueue->get_buf_finalize(req_cnt);
+            vqueue->get_buf_finalize(true);
             req_cnt = 0;
+        } else {
+            vqueue->get_buf_finalize(false);
         }
+
         req = static_cast<net_req*>(vqueue->get_buf_elem(&len));
     }
 
     if (req_cnt) {
-        vqueue->get_buf_finalize(req_cnt);
+        vqueue->db_used();
     }
 
     vqueue->get_buf_gc();

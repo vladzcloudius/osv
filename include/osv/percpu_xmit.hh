@@ -418,7 +418,12 @@ private:
     }
 
     bool test_and_set_pending() {
-        return _check_empty_queues.exchange(true, std::memory_order_relaxed);
+        if (!_check_empty_queues.load(std::memory_order_relaxed)) {
+            return _check_empty_queues.exchange(true,
+                                                std::memory_order_relaxed);
+        } else {
+            return true;
+        }
     }
     void clear_pending() {
         _check_empty_queues.store(false, std::memory_order_seq_cst);

@@ -202,7 +202,7 @@ public:
         // scheduled to run. In this case bypass per-CPU queues and transmit
         // in-place.
         //
-        if (has_pending() || !try_lock_running()) {
+        if (has_pending_weak() || !try_lock_running()) {
             push_cpu(buff, cooky, tx_bytes);
             return 0;
         }
@@ -226,6 +226,10 @@ public:
         //
         // We want to wake a dispatcher only if there is a new work for it since
         // otherwise there is no point for it to wake up.
+        //
+        // Since reads may be reordered "up" before the unlock_running() we must
+        // ensure this is not happening by applying a more restrictive memory
+        // order here.
         //
         if (has_pending()) {
             _txq->wake_worker();
@@ -268,6 +272,11 @@ public:
             //
             // The producer thread will first add a new element to the heap and
             // only then set the PENDING state.
+            //
+            // We need to ensure that PENDING is cleared before we _mg.pop() is
+            // performed (and possibly returns false - the heap and empty)
+            // because otherwise the producer may see the "old" value of the
+            // PENDING state and won't wake us up.
             //
             clear_pending();
 
@@ -403,11 +412,16 @@ private:
     bool has_pending() const {
         return _check_empty_queues.load(std::memory_order_acquire);
     }
+
+    bool has_pending_weak() const {
+        return _check_empty_queues.load(std::memory_order_relaxed);
+    }
+
     bool test_and_set_pending() {
-        return _check_empty_queues.exchange(true, std::memory_order_acq_rel);
+        return _check_empty_queues.exchange(true, std::memory_order_relaxed);
     }
     void clear_pending() {
-        _check_empty_queues.store(false, std::memory_order_release);
+        _check_empty_queues.store(false, std::memory_order_seq_cst);
     }
 
 private:

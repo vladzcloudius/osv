@@ -142,7 +142,7 @@ private:
     static const int _wakeup_threshold = CpuTxqSize / 2;
     int _popped_since_wakeup = 0;
 
-#ifdef TX_DEBUG
+#if defined(TX_DEBUG) && !defined(NDEBUG)
     void debug_check(value_type& tmp) {
         if (tmp.ts <= _last_ts) {
             printf("Time went backwards: curr_ts(%d) < prev_ts(%d)\n",

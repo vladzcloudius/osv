@@ -202,6 +202,7 @@ public:
      * when most of the queues would be empty.
      */
     void refill_heap() {
+        /* TODO: Improve me NOW!!! */
         auto it = _empty_lists.begin();
         while (it != _empty_lists.end()) {
             if (!(*it)->empty()) {

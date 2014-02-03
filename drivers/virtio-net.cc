@@ -155,7 +155,8 @@ inline void net::txq::kick_pending(u16 thresh)
     }
 }
 
-inline void net::txq::wake_worker() {
+inline void net::txq::wake_worker()
+{
     dispatcher_task.wake();
 }
 
@@ -601,19 +602,11 @@ inline int net::txq::try_xmit_one_locked(void* _req)
     update_stats(req);
     return 0;
 }
-/**
- * Check the packet, prepare the net_req and calculate the number of bytes
- * @param m_head
- * @param req
- * @param tx_bytes
- *
- * @return
- */
+
 int net::txq::xmit_prep(mbuf* m_head, void*& cooky)
 {
     net_req* req = new net_req(m_head);
     mbuf* m;
-    u64 tx_bytes = 0;
 
     if (m_head->M_dat.MH.MH_pkthdr.csum_flags != 0) {
         m = offload(m_head, &req->mhdr.hdr);
@@ -627,19 +620,6 @@ int net::txq::xmit_prep(mbuf* m_head, void*& cooky)
         }
     }
 
-    // After this point the packet is promissed to be sent
-    for (m = m_head; m != NULL; m = m->m_hdr.mh_next) {
-        int frag_len = m->m_hdr.mh_len;
-
-        if (frag_len != 0) {
-            net_d("Frag len=%d:", frag_len);
-            req->mhdr.num_buffers++;
-            tx_bytes += frag_len;
-        }
-    }
-
-    req->tx_bytes = tx_bytes;
-
     cooky = req;
     return 0;
 }
@@ -647,9 +627,28 @@ int net::txq::xmit_prep(mbuf* m_head, void*& cooky)
 int net::txq::try_xmit_one_locked(net_req* req)
 {
     mbuf *m_head = req->mb, *m;
-    u16 vec_sz = req->mhdr.num_buffers + 1;
+    u16 vec_sz = 0;
+    u64 tx_bytes = 0;
 
     DEBUG_ASSERT(!try_lock_running(), "RUNNING lock not taken!\n");
+
+    vqueue->init_sg();
+    vqueue->add_out_sg(static_cast<void*>(&req->mhdr), _parent->_hdr_size);
+
+    // After this point the packet is promissed to be sent
+    for (m = m_head; m != NULL; m = m->m_hdr.mh_next) {
+        int frag_len = m->m_hdr.mh_len;
+
+        if (frag_len != 0) {
+            net_d("Frag len=%d:", frag_len);
+            vec_sz++;
+            tx_bytes += frag_len;
+            vqueue->add_out_sg(m->m_hdr.mh_data, m->m_hdr.mh_len);
+        }
+    }
+
+    req->mhdr.num_buffers = vec_sz;
+    req->tx_bytes = tx_bytes;
 
     if (!vqueue->avail_ring_has_room(vec_sz)) {
         if (vqueue->used_ring_not_empty()) {
@@ -659,15 +658,6 @@ int net::txq::try_xmit_one_locked(net_req* req)
             }
         } else {
             return ENOBUFS;
-        }
-    }
-
-    vqueue->init_sg();
-    vqueue->add_out_sg(static_cast<void*>(&req->mhdr), _parent->_hdr_size);
-
-    for (m = m_head; m != NULL; m = m->m_hdr.mh_next) {
-        if (m->m_hdr.mh_len) {
-            vqueue->add_out_sg(m->m_hdr.mh_data, m->m_hdr.mh_len);
         }
     }
 
@@ -695,12 +685,15 @@ void net::txq::xmit_one_locked(void* _req)
 {
     net_req* req = static_cast<net_req*>(_req);
 
-    while (try_xmit_one_locked(req)) {
-        // We are going to sleep - kick() the pending packets
-        kick_pending();
+    if (try_xmit_one_locked(req)) {
+        do {
+            // We are going to sleep - kick() the pending packets
+            kick_pending();
 
-        _parent->virtio_driver::wait_for_queue(vqueue,
-                                               &vring::used_ring_not_empty);
+            _parent->virtio_driver::wait_for_queue(vqueue,
+                                                   &vring::used_ring_not_empty);
+            gc();
+        } while (!vqueue->add_buf(req));
     }
 
     trace_virtio_net_tx_packet(_parent->_ifn->if_index, vqueue->_sg_vec.size());

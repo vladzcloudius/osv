@@ -224,10 +224,6 @@ public:
         // We want to wake a dispatcher only if there is a new work for it since
         // otherwise there is no point for it to wake up.
         //
-        // Since reads may be reordered "up" before the unlock_running() we must
-        // ensure this is not happening by applying a more restrictive memory
-        // order here.
-        //
         if (has_pending()) {
             _txq->wake_worker();
         }

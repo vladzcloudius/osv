@@ -199,7 +199,7 @@ public:
         // scheduled to run. In this case bypass per-CPU queues and transmit
         // in-place.
         //
-        if (has_pending_weak() || !try_lock_running()) {
+        if (has_pending() || !try_lock_running()) {
             push_cpu(cooky);
             return 0;
         }
@@ -410,20 +410,11 @@ private:
         return _check_empty_queues.load(std::memory_order_acquire);
     }
 
-    bool has_pending_weak() const {
-        return _check_empty_queues.load(std::memory_order_relaxed);
-    }
-
     bool test_and_set_pending() {
-        if (!_check_empty_queues.load(std::memory_order_relaxed)) {
-            return _check_empty_queues.exchange(true,
-                                                std::memory_order_relaxed);
-        } else {
-            return true;
-        }
+        return _check_empty_queues.exchange(true, std::memory_order_acq_rel);
     }
     void clear_pending() {
-        _check_empty_queues.store(false, std::memory_order_seq_cst);
+        _check_empty_queues.store(false, std::memory_order_release);
     }
 
 private:

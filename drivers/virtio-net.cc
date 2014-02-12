@@ -203,7 +203,7 @@ void net::fill_qstats(const struct txq& txq,
     printf("pkts(%d)/kicks(%d)=%f\n", txq.stats.tx_packets,
            txq.stats.tx_hv_kicks,
            (double)txq.stats.tx_packets/txq.stats.tx_hv_kicks);
-    printf("hv_kicks(%d)/kicks(%d)=%f\n", txq.stats.tx_hv_kicks,
+    printf("hv_kicks(%d)/hv_kicks(%d)=%f\n", txq.stats.tx_hv_kicks,
            txq.stats.tx_kicks,
            (double)txq.stats.tx_hv_kicks/txq.stats.tx_kicks);
     printf("disp_pkts(%d)/disp_wakeups(%d) = %f\n", txq.stats.tx_pkts_from_disp,

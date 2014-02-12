@@ -12,14 +12,12 @@
 #include <boost/program_options.hpp>
 #include <boost/algorithm/string.hpp>
 #include <cctype>
-#include "elf.hh"
-#include "tls.hh"
-#include "msr.hh"
+#include <osv/elf.hh>
+#include <osv/tls.hh>
 #include "exceptions.hh"
-#include "debug.hh"
+#include <osv/debug.hh>
 #include "drivers/pci.hh"
 #include "smp.hh"
-#include "xen.hh"
 #include "ioapic.hh"
 
 #include "drivers/acpi.hh"
@@ -29,24 +27,27 @@
 #include "drivers/virtio-scsi.hh"
 #include "drivers/virtio-rng.hh"
 #include "drivers/xenfront-xenbus.hh"
+#include "drivers/ahci.hh"
+#include "drivers/ide.hh"
 
-#include "sched.hh"
-#include "drivers/clock.hh"
-#include "drivers/clockevent.hh"
+#include <osv/sched.hh>
 #include "drivers/console.hh"
 #include "drivers/pvpanic.hh"
-#include "barrier.hh"
+#include <osv/barrier.hh>
 #include "arch.hh"
+#include "arch-setup.hh"
 #include "osv/trace.hh"
 #include <osv/power.hh>
 #include <osv/rcu.hh>
-#include "mempool.hh"
+#include <osv/mempool.hh>
 #include <bsd/porting/networking.hh>
-#include "dhcp.hh"
+#include <bsd/porting/shrinker.h>
+#include <osv/dhcp.hh>
 #include <osv/version.h>
 #include <osv/run.hh>
 #include <osv/shutdown.hh>
-#include "commands.hh"
+#include <osv/commands.hh>
+#include <osv/boot.hh>
 
 using namespace osv;
 
@@ -60,6 +61,8 @@ size_t elf_size;
 void* elf_start;
 elf::tls_data tls_data;
 
+boot_time_chart boot_time;
+
 void setup_tls(elf::init_table inittab)
 {
     tls_data = inittab.tls;
@@ -69,7 +72,8 @@ void setup_tls(elf::init_table inittab)
     memcpy(tcb0, inittab.tls.start, inittab.tls.size);
     auto p = reinterpret_cast<thread_control_block*>(tcb0 + inittab.tls.size);
     p->self = p;
-    processor::wrmsr(msr::IA32_FS_BASE, reinterpret_cast<uint64_t>(p));
+
+    arch_setup_tls(p);
 }
 
 extern "C" {
@@ -79,21 +83,17 @@ extern "C" {
     void ramdisk_init(void);
 }
 
-
-void disable_pic()
-{
-    // PIC not present in Xen
-    XENPV_ALTERNATIVE({ outb(0xff, 0x21); outb(0xff, 0xa1); }, {});
-}
-
 void premain()
 {
-    disable_pic();
+    arch_init_premain();
+
     auto inittab = elf::get_init(elf_header);
     setup_tls(inittab);
+    boot_time.event("TLS initialization");
     for (auto init = inittab.start; init < inittab.start + inittab.count; ++init) {
         (*init)();
     }
+    boot_time.event(".init functions");
 }
 
 int main(int ac, char **av)
@@ -111,6 +111,8 @@ static bool opt_log_backtrace = false;
 static bool opt_mount = true;
 static bool opt_vga = false;
 static bool opt_verbose = false;
+static std::string opt_chdir;
+static bool opt_bootchart = false;
 
 std::tuple<int, char**> parse_options(int ac, char** av)
 {
@@ -137,6 +139,9 @@ std::tuple<int, char**> parse_options(int ac, char** av)
         ("noshutdown", "continue running after main() returns")
         ("vga", "use vga as a console device")
         ("verbose", "be verbose, print debug messages")
+        ("env", bpo::value<std::vector<std::string>>(), "set Unix-like environment variable (putenv())")
+        ("cwd", bpo::value<std::vector<std::string>>(), "set current working directory")
+        ("bootchart", "perform a test boot measuring a time distribution of the various operations\n")
     ;
     bpo::variables_map vars;
     // don't allow --foo bar (require --foo=bar) so we can find the first non-option
@@ -172,6 +177,10 @@ std::tuple<int, char**> parse_options(int ac, char** av)
         enable_verbose();
     }
 
+    if (vars.count("bootchart")) {
+        opt_bootchart = true;
+    }
+
     if (vars.count("trace")) {
         auto tv = vars["trace"].as<std::vector<std::string>>();
         for (auto t : tv) {
@@ -184,6 +193,21 @@ std::tuple<int, char**> parse_options(int ac, char** av)
     }
     opt_mount = !vars.count("nomount");
     opt_vga = vars.count("vga");
+
+    if (vars.count("env")) {
+        for (auto t : vars["env"].as<std::vector<std::string>>()) {
+            debug("Setting in environment: %s\n", t);
+            putenv(strdup(t.c_str()));
+        }
+    }
+
+    if (vars.count("cwd")) {
+        auto v = vars["cwd"].as<std::vector<std::string>>();
+        if (v.size() > 1) {
+            printf("Ignoring '--cwd' options after the first.");
+        }
+        opt_chdir = v.front();
+    }
 
     av += nr_options;
     ac -= nr_options;
@@ -217,7 +241,7 @@ std::vector<std::vector<std::string> > prepare_commands(int ac, char** av)
 // osv::run.
 void *__libc_stack_end;
 
-void run_main(std::vector<std::string> &vec)
+void run_main(const std::vector<std::string> &vec)
 {
     auto b = std::begin(vec)++;
     auto e = std::end(vec);
@@ -239,8 +263,21 @@ void run_main(std::vector<std::string> &vec)
         }
         return;
     }
+
+    if (opt_bootchart) {
+        boot_time.print_chart();
+    }
+
     printf("run_main(): cannot execute %s. Powering off.\n", command.c_str());
     osv::poweroff();
+}
+
+void *_run_main(void *data)
+{
+    auto vecp = (std::vector<std::string> *)data;
+    run_main(*vecp);
+    delete vecp;
+    return nullptr;
 }
 
 void* do_main_thread(void *_commands)
@@ -250,9 +287,11 @@ void* do_main_thread(void *_commands)
 
     // initialize panic drivers
     panic::pvpanic::probe_and_setup();
+    boot_time.event("pvpanic done");
 
     // Enumerate PCI devices
     pci::pci_device_enumeration();
+    boot_time.event("pci enumerated");
 
     // Initialize all drivers
     hw::driver_manager* drvman = hw::driver_manager::instance();
@@ -261,14 +300,20 @@ void* do_main_thread(void *_commands)
     drvman->register_driver(virtio::net::probe);
     drvman->register_driver(virtio::rng::probe);
     drvman->register_driver(xenfront::xenbus::probe);
+    drvman->register_driver(ahci::hba::probe);
+    drvman->register_driver(ide::ide_drive::probe);
+    boot_time.event("drivers probe");
     drvman->load_all();
     drvman->list_drivers();
 
     randomdev::randomdev_init();
+    boot_time.event("drivers loaded");
 
     if (opt_mount) {
         mount_zfs_rootfs();
+        bsd_shrinker_init();
     }
+    boot_time.event("ZFS mounted");
 
     bool has_if = false;
     osv::for_each_if([&has_if] (std::string if_name) {
@@ -285,9 +330,37 @@ void* do_main_thread(void *_commands)
         dhcp_start(true);
     }
 
+    if (!opt_chdir.empty()) {
+        debug("Chdir to: '%s'\n", opt_chdir.c_str());
+
+        if (chdir(opt_chdir.c_str()) != 0) {
+            perror("chdir");
+        }
+        debug("chdir done\n");
+    }
+
+    boot_time.event("Total time");
+
     // run each payload in order
+    // Our parse_command_line() leaves at the end of each command a delimiter,
+    // can be '&' if we need to run this command in a new thread, or ';' or
+    // empty otherwise, to run in this thread.
+    std::vector<pthread_t> bg;
     for (auto &it : *commands) {
-        run_main(it);
+        std::vector<std::string> newvec(it.begin(), std::prev(it.end()));
+        if (it.back() != "&") {
+            run_main(newvec);
+        } else {
+            pthread_t t;
+            pthread_create(&t, nullptr, _run_main,
+                    new std::vector<std::string> (newvec));
+            bg.push_back(t);
+        }
+    }
+
+    void* retval;
+    for (auto t : bg) {
+        pthread_join(t, &retval);
     }
 
     return nullptr;
@@ -308,6 +381,7 @@ void main_cont(int ac, char** av)
     cmds = prepare_commands(ac, av);
     ioapic::init();
     smp_launch();
+    boot_time.event("SMP launched");
     memory::enable_debug_allocator();
     acpi::init();
     console::console_init(opt_vga);
@@ -319,11 +393,14 @@ void main_cont(int ac, char** av)
     }
     sched::init_detached_threads_reaper();
     rcu_init();
+    boot_time.event("RCU initialized");
 
     vfs_init();
+    boot_time.event("VFS initialized");
     ramdisk_init();
 
     net_init();
+    boot_time.event("Network initialized");
 
     processor::sti();
 

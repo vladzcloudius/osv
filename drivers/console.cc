@@ -8,7 +8,7 @@
 
 #include <osv/prex.h>
 #include <osv/device.h>
-#include <sched.hh>
+#include <osv/sched.hh>
 #include <queue>
 #include <deque>
 #include <vector>
@@ -17,7 +17,6 @@
 #include "isa-serial.hh"
 #include "vga.hh"
 #include "debug-console.hh"
-#include "drivers/clock.hh"
 #include <termios.h>
 #include <signal.h>
 
@@ -30,13 +29,15 @@ debug_console console;
 
 void write(const char *msg, size_t len)
 {
-    console.write(msg, len);
+    if (len)
+        console.write(msg, len);
 }
 
 // lockless version
 void write_ll(const char *msg, size_t len)
 {
-    console.write_ll(msg, len);
+    if (len)
+        console.write_ll(msg, len);
 }
 
 mutex console_mutex;
@@ -95,6 +96,9 @@ void console_poll()
         std::lock_guard<mutex> lock(console_mutex);
         sched::thread::wait_until(console_mutex, [&] { return console.input_ready(); });
         char c = console.readch();
+        if (c == 0)
+            continue;
+
         if (c == '\r' && tio.c_iflag & ICRNL) {
             c = '\n';
         }
@@ -278,7 +282,8 @@ struct driver console_driver = {
 
 void console_init(bool use_vga)
 {
-    auto console_poll_thread = new sched::thread(console_poll);
+    auto console_poll_thread = new sched::thread(console_poll,
+            sched::thread::attr().name("console"));
     Console* console;
 
     if (use_vga)

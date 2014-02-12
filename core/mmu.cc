@@ -5,19 +5,19 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "mmu.hh"
-#include "mempool.hh"
+#include <osv/mmu.hh>
+#include <osv/mempool.hh>
 #include "processor.hh"
-#include "debug.hh"
+#include <osv/debug.hh>
 #include "exceptions.hh"
 #include <boost/format.hpp>
 #include <string.h>
 #include <iterator>
 #include "libc/signal.hh"
-#include "align.hh"
-#include "interrupt.hh"
-#include "ilog2.hh"
-#include "prio.hh"
+#include <osv/align.hh>
+#include <osv/interrupt.hh>
+#include <osv/ilog2.hh>
+#include <osv/prio.hh>
 #include <safe-ptr.hh>
 #include "fs/vfs/vfs.h"
 #include <osv/error.h>
@@ -170,9 +170,13 @@ void split_large_page(hw_ptep ptep, unsigned level)
     }
 }
 
-struct fill_page {
-public:
-    virtual void fill(void* addr, uint64_t offset, uintptr_t size) = 0;
+struct map_page_ops {
+    virtual void* alloc(uintptr_t offset) = 0;
+    virtual void* alloc(size_t size, uintptr_t offset) = 0;
+    virtual void free(void *addr, uintptr_t offset) = 0;
+    virtual void free(void *addr, size_t size, uintptr_t offset) = 0;
+    virtual void finalize() = 0;
+    virtual ~map_page_ops() {}
 };
 
 void debug_count_ptes(pt_element pte, int level, size_t &nsmall, size_t &nhuge)
@@ -310,32 +314,33 @@ template<typename PageOp> class map_level<PageOp, -1>
 {
 private:
     friend class map_level<PageOp, 0>;
-    map_level(uintptr_t vcur, size_t size, PageOp page_mapper, size_t slop) {}
-    void operator()(hw_ptep parent, uintptr_t base_virt, uintptr_t vstart) {
+    map_level(uintptr_t vma_start, uintptr_t vcur, size_t size, PageOp page_mapper, size_t slop) {}
+    void operator()(hw_ptep parent, uintptr_t base_virt) {
         assert(0);
     }
 };
 
 template<typename PageOp>
-        void map_range(uintptr_t vstart, size_t size, PageOp& page_mapper, size_t slop = page_size)
+        void map_range(uintptr_t vma_start, uintptr_t vstart, size_t size, PageOp& page_mapper, size_t slop = page_size)
 {
-    map_level<PageOp, 4> pt_mapper(vstart, size, page_mapper, slop);
-    pt_mapper(hw_ptep::force(&page_table_root), 0, vstart);
+    map_level<PageOp, 4> pt_mapper(vma_start, vstart, size, page_mapper, slop);
+    pt_mapper(hw_ptep::force(&page_table_root));
 }
 
 template<typename PageOp, int ParentLevel> class map_level {
 private:
+    uintptr_t vma_start;
     uintptr_t vcur;
     uintptr_t vend;
     size_t slop;
     PageOp& page_mapper;
     static constexpr int level = ParentLevel - 1;
 
-    friend void map_range<PageOp>(uintptr_t, size_t, PageOp&, size_t);
+    friend void map_range<PageOp>(uintptr_t, uintptr_t, size_t, PageOp&, size_t);
     friend class map_level<PageOp, ParentLevel + 1>;
 
-    map_level(uintptr_t vcur, size_t size, PageOp& page_mapper, size_t slop) :
-        vcur(vcur), vend(vcur + size - 1), slop(slop), page_mapper(page_mapper) {}
+    map_level(uintptr_t vma_start, uintptr_t vcur, size_t size, PageOp& page_mapper, size_t slop) :
+        vma_start(vma_start), vcur(vcur), vend(vcur + size - 1), slop(slop), page_mapper(page_mapper) {}
     bool skip_pte(hw_ptep ptep) {
         return page_mapper.skip_empty() && ptep.read().empty();
     }
@@ -343,12 +348,12 @@ private:
         return page_mapper.descend() && !ptep.read().empty() && !ptep.read().large();
     }
     void map_range(uintptr_t vcur, size_t size, PageOp& page_mapper, size_t slop,
-            hw_ptep ptep, uintptr_t base_virt, uintptr_t vstart)
+            hw_ptep ptep, uintptr_t base_virt)
     {
-        map_level<PageOp, level> pt_mapper(vcur, size, page_mapper, slop);
-        pt_mapper(ptep, base_virt, vstart);
+        map_level<PageOp, level> pt_mapper(vma_start, vcur, size, page_mapper, slop);
+        pt_mapper(ptep, base_virt);
     }
-    void operator()(hw_ptep parent, uintptr_t base_virt = 0, uintptr_t vstart = 0) {
+    void operator()(hw_ptep parent, uintptr_t base_virt = 0) {
         if (!parent.read().present()) {
             if (!page_mapper.allocate_intermediate()) {
                 return;
@@ -365,7 +370,7 @@ private:
                 split_large_page(parent, ParentLevel);
             } else {
                 // If page_mapper does not want to split, let it handle subpage by itself
-                page_mapper.sub_page(parent, ParentLevel, base_virt - vstart);
+                page_mapper.sub_page(parent, ParentLevel, base_virt - vma_start);
                 return;
             }
         }
@@ -380,12 +385,12 @@ private:
             hw_ptep ptep = pt.at(idx);
             uintptr_t vstart1 = vcur, vend1 = vend;
             clamp(vstart1, vend1, base_virt, base_virt + step - 1, slop);
-            if (level < nr_page_sizes && vstart1 == base_virt && vend1 == base_virt + step - 1) {
-                uintptr_t offset = base_virt - vstart;
+            if (unsigned(level) < nr_page_sizes && vstart1 == base_virt && vend1 == base_virt + step - 1) {
+                uintptr_t offset = base_virt - vma_start;
                 if (level) {
                     if (!skip_pte(ptep)) {
                         if (descend(ptep) || !page_mapper.huge_page(ptep, offset)) {
-                            map_range(vstart1, vend1 - vstart1 + 1, page_mapper, slop, ptep, base_virt, vstart);
+                            map_range(vstart1, vend1 - vstart1 + 1, page_mapper, slop, ptep, base_virt);
                             page_mapper.intermediate_page_post(ptep, offset);
                         }
                     }
@@ -395,7 +400,7 @@ private:
                     }
                 }
             } else {
-                map_range(vstart1, vend1 - vstart1 + 1, page_mapper, slop, ptep, base_virt, vstart);
+                map_range(vstart1, vend1 - vstart1 + 1, page_mapper, slop, ptep, base_virt);
             }
             base_virt += step;
             ++idx;
@@ -451,18 +456,23 @@ private:
 template <account_opt T = account_opt::no>
 class populate : public vma_operation<allocate_intermediate_opt::yes, skip_empty_opt::no, T> {
 private:
-    fill_page *fill;
+    map_page_ops* _pops;
     unsigned int perm;
+    bool _map_dirty;
+    pt_element dirty(pt_element pte) {
+        pte.set_dirty(_map_dirty);
+        return pte;
+    }
 public:
-    populate(fill_page *fill, unsigned int perm) : fill(fill), perm(perm) { }
+    populate(map_page_ops* pops, unsigned int perm, bool map_dirty = true) :
+        _pops(pops), perm(perm), _map_dirty(map_dirty) { }
     void small_page(hw_ptep ptep, uintptr_t offset){
         if (!ptep.read().empty()) {
             return;
         }
-        phys page = virt_to_phys(memory::alloc_page());
-        fill->fill(phys_to_virt(page), offset, page_size);
-        if (!ptep.compare_exchange(make_empty_pte(), make_normal_pte(page, perm))) {
-            memory::free_page(phys_to_virt(page));
+        phys page = virt_to_phys(_pops->alloc(offset));
+        if (!ptep.compare_exchange(make_empty_pte(), dirty(make_normal_pte(page, perm)))) {
+            _pops->free(phys_to_virt(page), offset);
         } else {
             this->account(mmu::page_size);
         }
@@ -472,15 +482,14 @@ public:
         if (!pte.empty()) {
             return true;
         }
-        void *vpage = memory::alloc_huge_page(huge_page_size);
+        void *vpage = _pops->alloc(huge_page_size, offset);
         if (!vpage) {
             return false;
         }
 
         phys page = virt_to_phys(vpage);
-        fill->fill(vpage, offset, huge_page_size);
-        if (!ptep.compare_exchange(make_empty_pte(), make_large_pte(page, perm))) {
-            memory::free_huge_page(phys_to_virt(page), huge_page_size);
+        if (!ptep.compare_exchange(make_empty_pte(), dirty(make_large_pte(page, perm)))) {
+            _pops->free(phys_to_virt(page), huge_page_size, offset);
         } else {
             this->account(mmu::huge_page_size);
         }
@@ -495,23 +504,28 @@ public:
 template <account_opt T = account_opt::no>
 class unpopulate : public vma_operation<allocate_intermediate_opt::no, skip_empty_opt::yes, T> {
 private:
-    std::stack<void*> small_pages;
-    std::stack<void*> huge_pages;
+    struct page {
+        void *addr;
+        uintptr_t offset;
+    };
+    std::stack<page> small_pages;
+    std::stack<page> huge_pages;
+    map_page_ops* _pops;
 public:
+    unpopulate(map_page_ops* pops) : _pops(pops) {}
     void small_page(hw_ptep ptep, uintptr_t offset) {
         // Note: we free the page even if it is already marked "not present".
         // evacuate() makes sure we are only called for allocated pages, and
         // not-present may only mean mprotect(PROT_NONE).
         pt_element pte = ptep.read();
         ptep.write(make_empty_pte());
-        small_pages.push(phys_to_virt(pte.addr(false)));
+        small_pages.push(page {phys_to_virt(pte.addr(false)), offset});
         this->account(mmu::page_size);
     }
     bool huge_page(hw_ptep ptep, uintptr_t offset) {
         pt_element pte = ptep.read();
         ptep.write(make_empty_pte());
-        huge_pages.push(phys_to_virt(pte.addr(false)));
-
+        huge_pages.push(page {phys_to_virt(pte.addr(true)), offset});
         this->account(mmu::huge_page_size);
         return true;
     }
@@ -523,11 +537,11 @@ public:
     }
     void finalize(void) {
         while (!small_pages.empty()) {
-            memory::free_page(small_pages.top());
+            _pops->free(small_pages.top().addr, small_pages.top().offset);
             small_pages.pop();
         }
         while (!huge_pages.empty()) {
-            memory::free_huge_page(huge_pages.top(), huge_page_size);
+            _pops->free(huge_pages.top().addr, huge_page_size, huge_pages.top().offset);
             huge_pages.pop();
         }
     }
@@ -562,6 +576,40 @@ public:
     }
 };
 
+template <typename T, account_opt Account = account_opt::no>
+class dirty_cleaner : public vma_operation<allocate_intermediate_opt::no, skip_empty_opt::yes, Account> {
+private:
+    bool do_flush;
+    T handler;
+public:
+    dirty_cleaner(T handler) : do_flush(false), handler(handler) {}
+    void small_page(hw_ptep ptep, uintptr_t offset) {
+        pt_element pte = ptep.read();
+        if (!pte.dirty()) {
+            return;
+        }
+        do_flush |= true;
+        pte.set_dirty(false);
+        ptep.write(pte);
+        handler(ptep.read().addr(false), offset);
+    }
+    bool huge_page(hw_ptep ptep, uintptr_t offset) {
+        pt_element pte = ptep.read();
+        if (!pte.dirty()) {
+            return true;
+        }
+        do_flush |= true;
+        pte.set_dirty(false);
+        ptep.write(pte);
+        handler(ptep.read().addr(true), offset, huge_page_size);
+        return true;
+    }
+    bool tlb_flush_needed(void) {return do_flush;}
+    void finalize() {
+        handler.finalize();
+    }
+};
+
 class virt_to_phys_map :
         public page_table_operation<allocate_intermediate_opt::no, skip_empty_opt::yes,
         descend_opt::yes, once_opt::yes, split_opt::no> {
@@ -592,12 +640,12 @@ public:
     }
 };
 
-template<typename T> ulong operate_range(T mapper, void *start, size_t size)
+template<typename T> ulong operate_range(T mapper, void *vma_start, void *start, size_t size)
 {
     start = align_down(start, page_size);
     size = std::max(align_up(size, page_size), page_size);
     uintptr_t virt = reinterpret_cast<uintptr_t>(start);
-    map_range(virt, size, mapper);
+    map_range(reinterpret_cast<uintptr_t>(vma_start), virt, size, mapper);
 
     // TODO: consider if instead of requesting a full TLB flush, we should
     // instead try to make more judicious use of INVLPG - e.g., in
@@ -610,9 +658,9 @@ template<typename T> ulong operate_range(T mapper, void *start, size_t size)
     return mapper.account_results();
 }
 
-template<typename T> ulong operate_range(T mapper, const vma &vma)
+template<typename T> ulong operate_range(T mapper, void *start, size_t size)
 {
-    return operate_range(mapper, (void*)vma.start(), vma.size());
+    return operate_range(mapper, start, start, size);
 }
 
 phys virt_to_phys_pt(void* virt)
@@ -620,7 +668,7 @@ phys virt_to_phys_pt(void* virt)
     auto v = reinterpret_cast<uintptr_t>(virt);
     auto vbase = align_down(v, page_size);
     virt_to_phys_map v2p_mapper(v);
-    map_range(vbase, page_size, v2p_mapper);
+    map_range(vbase, vbase, page_size, v2p_mapper);
     return v2p_mapper.addr();
 }
 
@@ -654,9 +702,9 @@ static error protect(void *addr, size_t size, unsigned int perm)
         i->split(start);
         if (contains(start, end, *i)) {
             i->protect(perm);
+            i->operate_range(protection(perm));
         }
     }
-    operate_range(protection(perm), addr, size);
     return no_error();
 }
 
@@ -700,7 +748,7 @@ ulong evacuate(uintptr_t start, uintptr_t end)
         i->split(start);
         if (contains(start, end, *i)) {
             auto& dead = *i--;
-            auto size = operate_range(unpopulate<account_opt::yes>(), dead);
+            auto size = dead.operate_range(unpopulate<account_opt::yes>(dead.page_ops()));
             ret += size;
             if (dead.has_flags(mmap_jvm_heap)) {
                 memory::stats::on_jvm_heap_free(size);
@@ -737,47 +785,83 @@ static error sync(void* addr, size_t length, int flags)
     return err;
 }
 
-struct fill_anon_page : fill_page {
-    virtual void fill(void* addr, uint64_t offset, uintptr_t size) {
-        memset(addr, 0, size);
+class map_anon_page_noinit : public map_page_ops {
+private:
+    virtual void* fill(void* addr, uint64_t offset, uintptr_t size) {
+        return addr;
+    }
+public:
+    virtual void* alloc(uintptr_t offset) override {
+        return fill(memory::alloc_page(), offset, page_size);
+    }
+    virtual void* alloc(size_t size, uintptr_t offset) override {
+        return fill(memory::alloc_huge_page(size), offset, size);
+    }
+    virtual void free(void *addr, uintptr_t offset) override {
+        return memory::free_page(addr);
+    }
+    virtual void free(void *addr, size_t size, uintptr_t offset) override {
+        return memory::free_huge_page(addr, size);
+    }
+    virtual void finalize() override {
     }
 };
 
-struct fill_anon_page_noinit: fill_page {
-    virtual void fill(void* addr, uint64_t offset, uintptr_t size) {
-    }
-};
-
-struct fill_file_page : fill_page {
-    uint64_t fsize;
-    f_offset foffset;
-    ssize_t len;
-    uint64_t prev_off;
-    std::vector<iovec> iovecs;
-
-    fill_file_page(size_t fsize, f_offset foffset, size_t size) :
-        fsize(fsize), foffset(foffset), len(0), prev_off(0),
-        iovecs((size / huge_page_size) + pte_per_page) {}
-    virtual void fill(void* addr, uint64_t offset, uintptr_t size) {
-        assert(offset >= prev_off);
-        f_offset off = foffset + offset;
-        if (off < fsize) {
-            uint64_t tail = std::min(size, fsize - off);
-            iovecs.push_back(iovec {addr, tail});
-            len += tail;
-            size -= tail;
-            addr = (char*)addr + tail;
-        }
-        if (size) {
+class map_anon_page : public map_anon_page_noinit {
+private:
+    virtual void* fill(void* addr, uint64_t offset, uintptr_t size) override {
+        if (addr) {
             memset(addr, 0, size);
         }
+        return addr;
     }
-    void finalize(file *f) {
+};
+
+class map_file_page : public map_anon_page_noinit {
+private:
+    file *_file;
+    uint64_t fsize;
+    f_offset foffset;
+    ssize_t len = 0;
+    uint64_t start_offset = 0;
+    std::vector<iovec> iovecs;
+
+    virtual void* fill(void* addr, uint64_t offset, uintptr_t size) {
+        if (len == 0) {
+            start_offset = foffset + offset;
+        }
+        iovecs.push_back(iovec {addr, size});
+        len += size;
+        return addr;
+    }
+public:
+    map_file_page(file *file, size_t fsize, f_offset foffset, size_t size) :
+        _file(file), fsize(fsize), foffset(foffset) {
+            iovecs.reserve((size / huge_page_size) + pte_per_page);
+        }
+    virtual ~map_file_page() {};
+
+    void finalize() {
         if (iovecs.empty()) {
             return;
         }
-        uio data{iovecs.data(), static_cast<int>(iovecs.size()), off_t(foffset), len, UIO_READ};
-        f->read(&data, FOF_OFFSET);
+        uio data{iovecs.data(), int(iovecs.size()), off_t(start_offset), len, UIO_READ};
+        _file->read(&data, FOF_OFFSET);
+        /* zero buffer tail on a short read */
+        int i = iovecs.size() - 1;
+        while (data.uio_resid) {
+            assert(i >= 0);
+            iovec iovec = iovecs[i--];
+            size_t tail = std::min(iovec.iov_len, size_t(data.uio_resid));
+            memset((char*)iovec.iov_base + iovec.iov_len - tail, 0, tail);
+            data.uio_resid -= tail;
+        }
+        // make object reusable for next mapping operation
+        len = start_offset = 0;
+        // force vector to release memory
+        std::vector<iovec> tmp;
+        tmp.reserve(1);
+        iovecs.swap(tmp);
     }
 };
 
@@ -802,16 +886,17 @@ uintptr_t allocate(vma *v, uintptr_t start, size_t size, bool search)
 
 void vpopulate(void* addr, size_t size)
 {
-    fill_anon_page fill;
     WITH_LOCK(vma_list_mutex) {
-        operate_range(populate<>(&fill, perm_rwx), addr, size);
+        map_anon_page map;
+        operate_range(populate<>(&map, perm_rwx), addr, size);
     }
 }
 
 void vdepopulate(void* addr, size_t size)
 {
     WITH_LOCK(vma_list_mutex) {
-        operate_range(unpopulate<>(), addr, size);
+        map_anon_page map;
+        operate_range(unpopulate<>(&map), addr, size);
     }
 }
 
@@ -824,13 +909,7 @@ void* map_anon(void* addr, size_t size, unsigned flags, unsigned perm)
     std::lock_guard<mutex> guard(vma_list_mutex);
     auto v = (void*) allocate(vma, start, size, search);
     if (flags & mmap_populate) {
-        if (flags & mmap_uninitialized) {
-            fill_anon_page_noinit zfill;
-            operate_range(populate<>(&zfill, perm), v, size);
-        } else {
-            fill_anon_page zfill;
-            operate_range(populate<>(&zfill, perm), v, size);
-        }
+        vma->operate_range(populate<>(vma->page_ops(), perm, vma->map_dirty()), v, size);
     }
     return v;
 }
@@ -842,14 +921,19 @@ void* map_file(void* addr, size_t size, unsigned flags, unsigned perm,
     bool shared = flags & mmu::mmap_shared;
     auto asize = align_up(size, mmu::page_size);
     auto start = reinterpret_cast<uintptr_t>(addr);
-    fill_file_page fill(::size(f), offset, size);
     auto *vma = new mmu::file_vma(addr_range(start, start + size), perm, f, offset, shared);
+    map_page_ops *map = nullptr;
     void *v;
     WITH_LOCK(vma_list_mutex) {
         v = (void*) allocate(vma, start, asize, search);
-        operate_range(populate<>(&fill, perm), v, asize);
+        if (flags & mmap_populate) {
+            map = vma->page_ops();
+            vma->operate_range(populate<>(map, perm, vma->map_dirty()), v, asize);
+        }
     }
-    fill.finalize(f.get());
+    // call finalize outside of the lock so the file read will not happen under it
+    if (map)
+        map->finalize();
     return v;
 }
 
@@ -909,7 +993,7 @@ bool access_fault(vma& vma, unsigned long error_code)
 {
     auto perm = vma.perm();
     if (error_code & page_fault_insn) {
-        return true;
+        return !(perm & perm_exec);
     }
     if (error_code & page_fault_write) {
         return !(perm & perm_write);
@@ -946,10 +1030,12 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
     trace_mmu_vm_fault_ret(addr, ef->error_code);
 }
 
-vma::vma(addr_range range, unsigned perm, unsigned flags)
+vma::vma(addr_range range, unsigned perm, unsigned flags, bool map_dirty, map_page_ops *page_ops)
     : _range(align_down(range.start()), align_up(range.end()))
     , _perm(perm)
     , _flags(flags)
+    , _map_dirty(map_dirty)
+    , _page_ops(page_ops)
 {
 }
 
@@ -992,6 +1078,11 @@ unsigned vma::perm() const
     return _perm;
 }
 
+unsigned vma::flags() const
+{
+    return _flags;
+}
+
 void vma::update_flags(unsigned flag)
 {
     assert(mutex_owned(&vma_list_mutex));
@@ -1003,8 +1094,54 @@ bool vma::has_flags(unsigned flag)
     return _flags & flag;
 }
 
+template<typename T> ulong vma::operate_range(T mapper, void *addr, size_t size)
+{
+    return mmu::operate_range(mapper, reinterpret_cast<void*>(start()), addr, size);
+}
+
+template<typename T> ulong vma::operate_range(T mapper)
+{
+    void *addr = reinterpret_cast<void*>(start());
+    return mmu::operate_range(mapper, addr, addr, size());
+}
+
+bool vma::map_dirty()
+{
+    return _map_dirty;
+}
+
+void vma::fault(uintptr_t addr, exception_frame *ef)
+{
+    auto hp_start = ::align_up(_range.start(), huge_page_size);
+    auto hp_end = ::align_down(_range.end(), huge_page_size);
+    size_t size;
+    if (hp_start <= addr && addr < hp_end) {
+        addr = ::align_down(addr, huge_page_size);
+        size = huge_page_size;
+    } else {
+        size = page_size;
+    }
+
+    map_page_ops *map = page_ops();
+    auto total = operate_range(populate<account_opt::yes>(map, _perm, map_dirty()), (void*)addr, size);
+    map->finalize();
+
+    if (_flags & mmap_jvm_heap) {
+        memory::stats::on_jvm_heap_alloc(total);
+    }
+}
+
+map_page_ops* vma::page_ops()
+{
+    return _page_ops;
+}
+
+static map_anon_page_noinit page_ops_noinit;
+static map_anon_page page_ops_init;
+static map_page_ops *page_ops_noinitp = &page_ops_noinit, *page_ops_initp = &page_ops_init;
+
 anon_vma::anon_vma(addr_range range, unsigned perm, unsigned flags)
-    : vma(range, perm, flags)
+    : vma(range, perm, flags, true, (_flags & mmap_uninitialized) ? page_ops_noinitp : page_ops_initp)
 {
 }
 
@@ -1023,34 +1160,8 @@ error anon_vma::sync(uintptr_t start, uintptr_t end)
     return no_error();
 }
 
-void anon_vma::fault(uintptr_t addr, exception_frame *ef)
-{
-    auto hp_start = ::align_up(_range.start(), huge_page_size);
-    auto hp_end = ::align_down(_range.end(), huge_page_size);
-    size_t size;
-    if (hp_start <= addr && addr < hp_end) {
-        addr = ::align_down(addr, huge_page_size);
-        size = huge_page_size;
-    } else {
-        size = page_size;
-    }
-
-    auto total = 0;
-    if (_flags & mmap_uninitialized) {
-        fill_anon_page_noinit zfill;
-        total = operate_range(populate<account_opt::yes>(&zfill, _perm), (void*)addr, size);
-    } else {
-        fill_anon_page zfill;
-        total = operate_range(populate<account_opt::yes>(&zfill, _perm), (void*)addr, size);
-    }
-
-    if (_flags & mmap_jvm_heap) {
-        memory::stats::on_jvm_heap_alloc(total);
-    }
-}
-
-jvm_balloon_vma::jvm_balloon_vma(uintptr_t start, uintptr_t end, balloon *b)
-    : vma(addr_range(start, end), mmu::perm_read, 0), _balloon(b)
+jvm_balloon_vma::jvm_balloon_vma(uintptr_t start, uintptr_t end, balloon *b, unsigned perm, unsigned flags)
+    : vma(addr_range(start, end), perm_rw, 0, true), _balloon(b), _real_perm(perm), _real_flags(flags)
 {
 }
 
@@ -1060,7 +1171,7 @@ void jvm_balloon_vma::split(uintptr_t edge)
     if (edge <= _range.start() || edge >= end) {
         return;
     }
-    auto * n = new jvm_balloon_vma(edge, end, _balloon);
+    auto * n = new jvm_balloon_vma(edge, end, _balloon, _real_perm, _real_flags);
     _range = addr_range(_range.start(), edge);
     vma_list.insert(*n);
 }
@@ -1070,18 +1181,30 @@ error jvm_balloon_vma::sync(uintptr_t start, uintptr_t end)
     return no_error();
 }
 
-void jvm_balloon_vma::fault(uintptr_t addr, exception_frame *ef)
+void jvm_balloon_vma::fault(uintptr_t fault_addr, exception_frame *ef)
 {
     std::lock_guard<mutex> guard(vma_list_mutex);
+    jvm_balloon_fault(_balloon, ef, this);
+    delete this;
+}
+
+void jvm_balloon_vma::detach_balloon()
+{
+    _balloon = nullptr;
     // Could block the creation of the next vma. No need to evacuate, we have no pages
     vma_list.erase(*this);
-    jvm_balloon_fault(_balloon, ef);
-    // We now delete manually, since we've already erased it manually.
-    delete this;
+    mmu::map_anon(addr(), size(), _real_flags, _real_perm);
 }
 
 jvm_balloon_vma::~jvm_balloon_vma()
 {
+    if (_balloon) {
+        // This is because the JVM may just decide to unmap a whole region if
+        // it believes the objects are no longer valid. It could be the case
+        // for a dangling mapping representing a balloon that was already moved
+        // out.
+        jvm_balloon_fault(_balloon, nullptr, this);
+    }
 }
 
 // This function marks an anonymous vma as holding the JVM Heap. The JVM may
@@ -1092,7 +1215,7 @@ jvm_balloon_vma::~jvm_balloon_vma()
 // previous anon vma that was in its place as holding the heap. That will work
 // most of the time and with most GC algos. If that is not sufficient, the
 // JVM will have to tell us about its regions itself.
-static void mark_jvm_heap(void* addr)
+static vma *mark_jvm_heap(void* addr)
 {
     WITH_LOCK(vma_list_mutex) {
         u64 a = reinterpret_cast<u64>(addr);
@@ -1102,11 +1225,13 @@ static void mark_jvm_heap(void* addr)
         vma& vma = *v;
 
         if (!vma.has_flags(mmap_jvm_heap)) {
-            auto mem = operate_range(count_maps(), vma);
+            auto mem = vma.operate_range(count_maps());
             memory::stats::on_jvm_heap_alloc(mem);
         }
 
         vma.update_flags(mmap_jvm_heap);
+
+        return &vma;
     }
 }
 
@@ -1114,9 +1239,9 @@ ulong map_jvm(void* addr, size_t size, balloon *b)
 {
     auto start = reinterpret_cast<uintptr_t>(addr);
 
-    mark_jvm_heap(addr);
+    vma *v = mark_jvm_heap(addr);
 
-    auto* vma = new mmu::jvm_balloon_vma(start, start + size, b);
+    auto* vma = new mmu::jvm_balloon_vma(start, start + size, b, v->perm(), v->flags());
     WITH_LOCK(vma_list_mutex) {
         auto ret = evacuate(start, start + size);
         vma_list.insert(*vma);
@@ -1126,7 +1251,7 @@ ulong map_jvm(void* addr, size_t size, balloon *b)
 }
 
 file_vma::file_vma(addr_range range, unsigned perm, fileref file, f_offset offset, bool shared)
-    : vma(range, perm, 0)
+    : vma(range, perm, 0, !shared)
     , _file(file)
     , _offset(offset)
     , _shared(shared)
@@ -1136,6 +1261,13 @@ file_vma::file_vma(addr_range range, unsigned perm, fileref file, f_offset offse
     if (err != 0) {
         throw make_error(err);
     }
+
+    _page_ops = new map_file_page(_file.get(), ::size(_file), _offset, size());
+}
+
+file_vma::~file_vma()
+{
+    delete _page_ops;
 }
 
 void file_vma::split(uintptr_t edge)
@@ -1149,18 +1281,51 @@ void file_vma::split(uintptr_t edge)
     vma_list.insert(*n);
 }
 
+class dirty_page_sync {
+    friend dirty_cleaner<dirty_page_sync, account_opt::yes>;
+    friend file_vma;
+private:
+    file *_file;
+    f_offset _offset;
+    uint64_t _size;
+    struct elm {
+        iovec iov;
+        off_t offset;
+    };
+    std::stack<elm> queue;
+    dirty_page_sync(file *file, f_offset offset, uint64_t size) : _file(file), _offset(offset), _size(size) {}
+    void operator()(phys addr, uintptr_t offset, size_t size) {
+        off_t off = _offset + offset;
+        size_t len = std::min(size, _size - off);
+        queue.push(elm{{phys_to_virt(addr), len}, off});
+    }
+    void operator()(phys addr, uintptr_t offset) {
+        (*this)(addr, offset, page_size);
+    }
+    void finalize() {
+        while(!queue.empty()) {
+            elm w = queue.top();
+            uio data{&w.iov, 1, w.offset, ssize_t(w.iov.iov_len), UIO_WRITE};
+            _file->write(&data, FOF_OFFSET);
+            queue.pop();
+        }
+    }
+};
+
 error file_vma::sync(uintptr_t start, uintptr_t end)
 {
     if (!_shared)
         return make_error(ENOMEM);
     start = std::max(start, _range.start());
     end = std::min(end, _range.end());
-    auto fsize = ::size(_file);
     uintptr_t size = end - start;
-    auto off = offset(start);
-    write(_file, addr(), off, std::min(size, fsize - off));
-    auto err = sys_fsync(_file.get());
-    return make_error(err);
+
+    dirty_page_sync sync(_file.get(), _offset, ::size(_file));
+    error err = no_error();
+    if (operate_range(dirty_cleaner<dirty_page_sync, account_opt::yes>(sync), (void*)start, size) != 0) {
+        err = make_error(sys_fsync(_file.get()));
+    }
+    return err;
 }
 
 int file_vma::validate_perm(unsigned perm)
@@ -1182,11 +1347,6 @@ int file_vma::validate_perm(unsigned perm)
     return 0;
 }
 
-void file_vma::fault(uintptr_t addr, exception_frame *ef)
-{
-    abort("trying to fault-in file-backed vma");
-}
-
 f_offset file_vma::offset(uintptr_t addr)
 {
     return _offset + (addr - _range.start());
@@ -1198,7 +1358,7 @@ void linear_map(void* _virt, phys addr, size_t size, size_t slop)
     slop = std::min(slop, page_size_level(nr_page_sizes - 1));
     assert((virt & (slop - 1)) == (addr & (slop - 1)));
     linear_page_mapper phys_map(addr, size);
-    map_range(virt, size, phys_map, slop);
+    map_range(virt, virt, size, phys_map, slop);
 }
 
 void free_initial_memory_range(uintptr_t addr, size_t size)

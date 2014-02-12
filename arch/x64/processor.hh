@@ -245,43 +245,61 @@ inline void sti_hlt() {
     asm volatile ("sti; hlt" : : : "memory");
 }
 
-inline u8 inb (u16 port)
+inline u8 inb(u16 port)
 {
     u8 r;
     asm volatile ("inb %1, %0":"=a" (r):"dN" (port));
     return r;
 }
 
-inline u16 inw (u16 port)
+inline u16 inw(u16 port)
 {
     u16 r;
     asm volatile ("inw %1, %0":"=a" (r):"dN" (port));
     return r;
 }
 
-inline u32 inl (u16 port)
+inline u32 inl(u16 port)
 {
     u32 r;
     asm volatile ("inl %1, %0":"=a" (r):"dN" (port));
     return r;
 }
 
-inline void outb (u8 val, u16 port)
+/* cnt is not bytes, 4byte counter */
+inline void insl(void *addr, int cnt, u16 port)
+{
+    asm volatile ("rep insl"
+        :"+D" (addr), "+c" (cnt)
+        : "d" (port)
+        : "memory", "cc");
+}
+
+inline void outb(u8 val, u16 port)
 {
     asm volatile ("outb %0, %1"::"a" (val), "dN" (port));
 
 }
 
-inline void outw (u16 val, u16 port)
+inline void outw(u16 val, u16 port)
 {
     asm volatile ("outw %0, %1"::"a" (val), "dN" (port));
 
 }
 
-inline void outl (u32 val, u16 port)
+inline void outl(u32 val, u16 port)
 {
     asm volatile ("outl %0, %1"::"a" (val), "dN" (port));
 
+}
+
+/* cnt is not bytes, 4byte counter */
+inline void outsl(void *addr, int cnt, u16 port)
+{
+    asm volatile ("rep outsl"
+        :"+S" (addr), "+c" (cnt)
+        : "d" (port)
+        : "cc");
 }
 
 inline void sti()
@@ -307,6 +325,11 @@ inline u64 rdtsc()
     u32 lo, hi;
     asm("rdtsc" : "=a"(lo), "=d"(hi));
     return lo | (u64(hi) << 32);
+}
+
+inline u64 ticks()
+{
+    return rdtsc();
 }
 
 struct fpu_state {

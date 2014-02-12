@@ -7,9 +7,9 @@
 
 // linux syscalls
 
-#include "debug.hh"
+#include <osv/debug.hh>
 #include <boost/format.hpp>
-#include "sched.hh"
+#include <osv/sched.hh>
 
 #include <syscall.h>
 #include <stdarg.h>
@@ -46,6 +46,5 @@ long syscall(long number, ...)
         }
     }
 
-    debug("syscall(): unimplemented system call %d\n", number);
-    abort();
+    abort("syscall(): unimplemented system call %d. Aborting.\n", number);
 }

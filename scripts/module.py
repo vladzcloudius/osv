@@ -73,22 +73,20 @@ def generate_manifests(modules, basic_apps):
             for app in basic_apps:
                 app.prepare_manifest(resolve.get_build_path(), manifest_type, manifest)
 
-def get_command_line(basic_apps):
-    if not basic_apps:
-        raise Exception("No apps")
-
-    if len(basic_apps) > 1:
-        raise Exception("Running more than one basic app not supported")
-
-    cmdline = basic_apps[0].get_launcher_args()
-    if isinstance(cmdline, basestring):
-        return cmdline
+def format_args(args):
+    if isinstance(args, basestring):
+        return args
     else:
-        return ' '.join(cmdline)
+        return ' '.join(args)
+
+def get_command_line(basic_apps):
+    return '&'.join((format_args(app.get_launcher_args()) for app in basic_apps))
 
 def make_modules(modules):
     for module in modules:
-        subprocess.call(["make module"], shell=True, cwd=module.local_path)
+        if os.path.exists(os.path.join(module.local_path, 'Makefile')):
+            if subprocess.call(["make module"], shell=True, cwd=module.local_path):
+                raise Exception('make failed for ' + module.name)
 
 def flatten_list(elememnts):
     if not elememnts:
@@ -132,12 +130,29 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     image_config_file = os.path.join(image_configs_dir, args.image_config + '.py')
-    if not os.path.exists(image_config_file):
-        print "No such image configuration: " + args.image_config
-        sys.exit(1)
+    if os.path.exists(image_config_file):
+        print "Using image config: %s" % image_config_file
+        config = resolve.local_import(image_config_file)
+        run_list = config.get('run', [])
+    else:
+        # If images/image_config doesn't exist, assume image_config is a
+        # comma-separated list of module names, and build an image from those
+        # modules (and their dependencies). The command line to run is to
+        # run each of the module's "default" command line, in parallel.
+        # You can choose a module's non-default command line, with a dot,
+        # e.g.: mgmt.shell use's mgmt's "shell" command line.
+        print "No such image configuration: " + args.image_config + ". Assuming list of modules."
+        run_list = []
+        for module in args.image_config.split(","):
+            a = module.split(".", 1)
+            name = a[0]
+            variant = a[1] if (len(a) > 1) else "default"
+            mod = api.require(name)
+            if hasattr(mod, variant):
+                run_list.append(getattr(mod, variant));
+            elif variant != "default" and variant != "none":
+                raise Exception("Attribute %s not set in module %s" % (variant, name))
 
-    print "Using image config: %s" % image_config_file
-    config = resolve.local_import(image_config_file)
     modules = resolve.get_required_modules()
 
     print "Modules:"
@@ -148,7 +163,6 @@ if __name__ == "__main__":
 
     make_modules(modules)
 
-    run_list = config.get('run', [])
     apps_to_run = get_basic_apps(run_list)
     generate_manifests(modules, apps_to_run)
     generate_cmdline(apps_to_run)

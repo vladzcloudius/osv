@@ -79,32 +79,27 @@ public:
      *
      */
     virtual s64 time() = 0;
+    /*
+     * Return current estimate of wall-clock time at OSV's boot.
+     *
+     * Note that this is not necessarily constant. Rather, if we (or more
+     * likely, the host) adjust the wall-clock time, boot_time() will be
+     * adjusted so that always boot_time() + uptime() = time().
+     *
+     * In other words, boot_time() is the instantaneous value of
+     * time()-uptime(), but faster to calculate and doesn't suffer from
+     * the above expression evaluating time() and uptime() in slightly
+     * different times.
+     */
+    virtual s64 boot_time() = 0;
+
+    /*
+     * convert a processor based timestamp (x86 tsc's for instance) to nanoseconds.
+     *
+     * Not all clocks are required to implement it.
+     */
+    virtual u64 processor_to_nano(u64 ticks) { return 0; }
 private:
     static clock* _c;
 };
-
-inline constexpr long long operator"" _ns(unsigned long long t)
-{
-    return t;
-}
-
-inline constexpr long long operator"" _us(unsigned long long t)
-{
-    return t * 1000_ns;
-}
-
-inline constexpr long long operator"" _ms(unsigned long long t)
-{
-    return t * 1000_us;
-}
-
-inline constexpr long long operator"" _s(unsigned long long t)
-{
-    return t * 1000_ms;
-}
-
-static inline s64 nanotime() {
-    return clock::get()->time();
-}
-
 #endif /* CLOCK_HH_ */

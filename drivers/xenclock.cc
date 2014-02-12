@@ -10,20 +10,22 @@
 #include <osv/types.h>
 #include <osv/percpu.hh>
 #include <osv/pvclock-abi.hh>
-#include "mmu.hh"
+#include <osv/mmu.hh>
 #include "string.h"
 #include "cpuid.hh"
-#include "barrier.hh"
+#include <osv/barrier.hh>
 #include "xen.hh"
-#include "debug.hh"
-#include "prio.hh"
-#include <preempt-lock.hh>
+#include <osv/debug.hh>
+#include <osv/prio.hh>
+#include <osv/preempt-lock.hh>
 
 class xenclock : public clock {
 public:
     xenclock();
     virtual s64 time() __attribute__((no_instrument_function));
     virtual s64 uptime() override __attribute__((no_instrument_function));
+    virtual s64 boot_time() override __attribute__((no_instrument_function));
+    virtual u64 processor_to_nano(u64 ticks) override __attribute__((no_instrument_function));
 private:
     pvclock_wall_clock* _wall;
     static void setup_cpu();
@@ -76,12 +78,31 @@ u64 xenclock::system_time()
     }
 }
 
+u64 xenclock::processor_to_nano(u64 ticks)
+{
+    WITH_LOCK(preempt_lock) {
+        auto cpu = sched::cpu::current()->id;
+        auto sys = &xen::xen_shared_info.vcpu_info[cpu].time;
+        return pvclock::processor_to_nano(sys, ticks);
+    }
+}
+
 s64 xenclock::uptime()
 {
     if (_smp_init) {
         return system_time() - _boot_systemtime;
     } else {
         return 0;
+    }
+}
+
+s64 xenclock::boot_time()
+{
+    // The following is time()-uptime():
+    if (_smp_init) {
+        return pvclock::wall_clock_boot(_wall) + _boot_systemtime;
+    } else {
+        return time();
     }
 }
 

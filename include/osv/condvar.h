@@ -114,7 +114,42 @@ typedef struct condvar {
      * a timeout hasn't yet occurred, but rather that one wake_one()/wake_all()
      * was consumed to wake us.
      */
-    int wait(mutex* user_mutex, uint64_t expiration);
+    template <class Clock, class Duration>
+    int wait(mutex *user_mutex, std::chrono::time_point<Clock, Duration> time)
+    {
+        sched::timer timer(*sched::thread::current());
+        timer.set(time);
+        return wait(user_mutex, &timer);
+    }
+    /**
+     * Wait on the condition variable, or for a specified duration to pass.
+     *
+     * Wait to be woken (with wake_one() or wake_all()), or the given duration
+     * has passed, whichever occurs first.
+     *
+     * It is assumed that wait() is called with the given mutex locked.
+     * This mutex is unlocked during the wait, and re-locked before wait()
+     * returns.
+     *
+     * The current implementation assumes (as do Posix Threads) that when
+     * multiple threads wait on the same condition variable concurrently,
+     * they all do it with the same mutex. If two threads concurrently use
+     * two different mutexes to wait on the same condition variable, the
+     * results are undefined (currently, it causes an assertion failure).
+     *
+     * \return 0 if woken by a wake_one() or wake_all(), or ETIMEOUT (!=0)
+     * if was not woken, but the timer expired. Note if a wakeup and the
+     * timeout race, by the time wait() returns the timer may have already
+     * expired even if 0 is returned. What a return of 0 means is not that
+     * a timeout hasn't yet occurred, but rather that one wake_one()/wake_all()
+     * was consumed to wake us.
+     */
+    template <class Rep, class Period>
+    int wait(mutex *user_mutex, std::chrono::duration<Rep, Period> duration) {
+        sched::timer timer(*sched::thread::current());
+        timer.set(duration);
+        return wait(user_mutex, &timer);
+    }
     /**
      * Wait on the condition variable, or timer to expire
      *
@@ -179,7 +214,6 @@ typedef struct condvar {
 
 __BEGIN_DECLS
 
-int condvar_wait(condvar_t *condvar, mutex_t* user_mutex, uint64_t expiration);
 void condvar_wake_one(condvar_t *condvar);
 void condvar_wake_all(condvar_t *condvar);
 
@@ -205,6 +239,12 @@ void condvar::wait_until(mutex& mtx, Pred pred)
 }
 
 
+#endif
+
+#ifndef __cplusplus
+// Note: "expiration" should use absolute times using the monotonic clock,
+// clock::get()->uptime().
+int condvar_wait(condvar_t *condvar, mutex_t* user_mutex, uint64_t expiration);
 #endif
 
 #endif /* MUTEX_H_ */

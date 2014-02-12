@@ -5,10 +5,10 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "sched.hh"
+#include <osv/sched.hh>
 #include "osv/percpu.hh"
 #include <bsd/porting/pcpu.h>
-#include "debug.hh"
+#include <osv/debug.hh>
 
 PERCPU(struct pcpu, pcpu);
 

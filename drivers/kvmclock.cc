@@ -8,19 +8,21 @@
 #include "clock.hh"
 #include "msr.hh"
 #include <osv/types.h>
-#include "mmu.hh"
+#include <osv/mmu.hh>
 #include "string.h"
 #include "cpuid.hh"
-#include "barrier.hh"
+#include <osv/barrier.hh>
 #include <osv/percpu.hh>
 #include <osv/pvclock-abi.hh>
-#include "prio.hh"
+#include <osv/prio.hh>
 
 class kvmclock : public clock {
 public:
     kvmclock();
     virtual s64 time() __attribute__((no_instrument_function));
     virtual s64 uptime() override __attribute__((no_instrument_function));
+    virtual s64 boot_time() override __attribute__((no_instrument_function));
+    virtual u64 processor_to_nano(u64 ticks) override __attribute__((no_instrument_function));
     static bool probe();
 private:
     u64 wall_clock_boot();
@@ -97,6 +99,16 @@ s64 kvmclock::uptime()
     }
 }
 
+s64 kvmclock::boot_time()
+{
+    // The following is time()-uptime():
+    auto r = wall_clock_boot();
+    if (_smp_init) {
+        r += _boot_systemtime;
+    }
+    return r;
+}
+
 u64 kvmclock::wall_clock_boot()
 {
     return pvclock::wall_clock_boot(_wall);
@@ -109,6 +121,11 @@ u64 kvmclock::system_time()
     auto r = pvclock::system_time(sys);
     sched::preempt_enable();
     return r;
+}
+
+u64 kvmclock::processor_to_nano(u64 ticks)
+{
+    return pvclock::processor_to_nano(&*_sys, ticks);
 }
 
 static __attribute__((constructor(init_prio::clock))) void setup_kvmclock()

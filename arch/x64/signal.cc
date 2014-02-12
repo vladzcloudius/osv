@@ -5,12 +5,12 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "align.hh"
+#include <osv/align.hh>
 #include "exceptions.hh"
 #include <signal.h>
 #include <stdlib.h>
 #include <arch-cpu.hh>
-#include <debug.hh>
+#include <osv/debug.hh>
 
 namespace arch {
 

@@ -1436,6 +1436,8 @@ top:
 		zfs_unlinked_add(zp, tx);
 	}
 
+	zfs_zinactive(zp);
+
 	txtype = TX_REMOVE;
 	zfs_log_remove(zilog, tx, txtype, dzp, name, obj);
 
@@ -1699,6 +1701,8 @@ top:
 
 out:
 	zfs_dirent_unlock(dl);
+
+	zfs_zinactive(zp);
 
 	if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
 		zil_commit(zilog, 0);
@@ -3703,6 +3707,7 @@ int
 zfs_inactive(vnode_t *vp)
 {
 	znode_t	*zp = VTOZ(vp);
+	uint32_t saved_z_ref_cnt;
 	zfsvfs_t *zfsvfs;
 	int error;
 
@@ -3721,6 +3726,22 @@ zfs_inactive(vnode_t *vp)
 		return 0;
 	}
 
+#ifndef __OSV__
+	/*
+	 * The if clause below is used to speed up the recycle
+	 * of a inode which isn't present in the underlying
+	 * file system anymore.
+	 *
+	 * The problem is that OSv VFS layer doesn't support
+	 * vrecycle. The call to vrecycle in the test below was also removed.
+	 *
+	 * vrecycle consists of eliminating all activity associated
+	 * with a given unused vnode and putting it back to the list of
+	 * free vnode objects.
+	 *
+	 * Keeping this code alive prevents zfs_inactive from working properly
+	 * on unlinked znodes given the facts mentioned above.
+	 */
 	mutex_enter(&zp->z_lock);
 	if (zp->z_unlinked) {
 		/*
@@ -3731,6 +3752,7 @@ zfs_inactive(vnode_t *vp)
 		return 0;
 	}
 	mutex_exit(&zp->z_lock);
+#endif
 
 	if (zp->z_atime_dirty && zp->z_unlinked == 0) {
 		dmu_tx_t *tx = dmu_tx_create(zfsvfs->z_os);
@@ -3751,6 +3773,16 @@ zfs_inactive(vnode_t *vp)
 	}
 
 	/*
+	 * Save the znode refcnt to determine later whether or not the
+	 * underlying object was destroyed by zfs_zinactive.
+	 * Do that by checking if the saved refcnt reaches zero after
+	 * decrementing it once.
+	 * This assignment must be done before the code below given that
+	 * the znode may not exist anymore.
+	 */
+	saved_z_ref_cnt = zp->z_ref_cnt;
+
+	/*
 	 * This might want to be moved into a separate VOP_RECLAIM eventually.
 	 */
 	if (zp->z_sa_hdl == NULL)
@@ -3759,7 +3791,16 @@ zfs_inactive(vnode_t *vp)
 		zfs_zinactive(zp);
 	rw_exit(&zfsvfs->z_teardown_inactive_lock);
 
-	vp->v_data = NULL;
+	/*
+	 * The following clause checks for the existence of the znode object,
+	 * if it no longer exists, then let's assign NULL to the v_data field
+	 * of the vnode meaning that it is completely inactive from the zfs
+	 * vnops perspective.
+	 */
+	if (--saved_z_ref_cnt == 0) {
+		vp->v_data = NULL;
+	}
+
 	return 0;
 }
 

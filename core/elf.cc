@@ -5,14 +5,14 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "elf.hh"
-#include "mmu.hh"
+#include <osv/elf.hh>
+#include <osv/mmu.hh>
 #include <boost/format.hpp>
 #include <exception>
 #include <memory>
 #include <string.h>
-#include "align.hh"
-#include "debug.hh"
+#include <osv/align.hh>
+#include <osv/debug.hh>
 #include <stdlib.h>
 #include <unistd.h>
 #include <boost/algorithm/string.hpp>
@@ -20,7 +20,13 @@
 #include <functional>
 #include <cxxabi.h>
 #include <iterator>
-#include <sched.hh>
+#include <osv/sched.hh>
+#include <osv/trace.hh>
+
+TRACEPOINT(trace_elf_load, "%s", const char *);
+TRACEPOINT(trace_elf_unload, "%s", const char *);
+TRACEPOINT(trace_elf_lookup, "%s", const char *);
+TRACEPOINT(trace_elf_lookup_addr, "%p", const void *);
 
 using namespace std;
 using namespace boost::range;
@@ -76,8 +82,7 @@ void* symbol_module::relocated_addr() const
     case STT_IFUNC:
         return reinterpret_cast<void *(*)()>(base + symbol->st_value)();
     default:
-        debug(fmt("unknown relocation type %d\n") % symbol_type(*symbol));
-        abort();
+        abort("Unknown relocation type %d\n", symbol_type(*symbol));
     }
 }
 
@@ -136,7 +141,6 @@ load_program_headers();
 
 file::~file()
 {
-    get_program()->remove_object(this);
 }
 
 memory_image::memory_image(program& prog, void* base)
@@ -379,8 +383,7 @@ symbol_module object::symbol(unsigned idx)
         return symbol_module(sym, this);
     }
     if (!ret.symbol) {
-        debug(fmt("failed looking up symbol %1%\n") % demangle(name));
-        abort();
+        abort("Failed looking up symbol %s\n", demangle(name).c_str());
     }
     return ret;
 }
@@ -756,29 +759,30 @@ program::program(void* addr)
     _core = make_shared<memory_image>(*this, reinterpret_cast<void*>(0x200000));
     assert(_core->module_index() == core_module_index);
     _core->load_segments();
-    set_object("libc.so.6", _core);
-    set_object("libm.so.6", _core);
-    set_object("ld-linux-x86-64.so.2", _core);
-    set_object("libpthread.so.0", _core);
-    set_object("libdl.so.2", _core);
-    set_object("librt.so.1", _core);
-    set_object("libstdc++.so.6", _core);
-    set_object("libboost_system-mt.so.1.53.0", _core);
-    set_object("libboost_program_options-mt.so.1.53.0", _core);
+    // Our kernel already supplies the features of a bunch of traditional
+    // shared libraries:
+    static const auto supplied_modules = {
+          "libc.so.6",
+          "libm.so.6",
+          "ld-linux-x86-64.so.2",
+          "libpthread.so.0",
+          "libdl.so.2",
+          "librt.so.1",
+          "libstdc++.so.6",
+          "libboost_system-mt.so.1.53.0",
+          "libboost_program_options-mt.so.1.53.0",
+    };
+    auto ml = new modules_list();
+    ml->objects.push_back(_core.get());
+    for (auto name : supplied_modules) {
+        _files[name] = _core;
+    }
+    _modules_rcu.assign(ml);
 }
 
 void program::set_search_path(std::initializer_list<std::string> path)
 {
     _search_path = path;
-}
-
-void program::set_object(std::string name, std::shared_ptr<elf::object> obj)
-{
-    _files[name] = obj;
-    if (std::find(_modules.begin(), _modules.end(), obj.get()) == _modules.end()) {
-        _modules.push_back(obj.get());
-        _modules_adds++;
-    }
 }
 
 static std::string getcwd()
@@ -804,6 +808,9 @@ static std::string canonicalize(std::string p)
 std::shared_ptr<elf::object>
 program::get_library(std::string name, std::vector<std::string> extra_path)
 {
+    // Note: this lock can be recursive (get_library calls load_needed which
+    // calls get_library again).
+    SCOPE_LOCK(_mutex);
     fileref f;
     if (name.find('/') == name.npos) {
         std::vector<std::string> search_path;
@@ -827,18 +834,28 @@ program::get_library(std::string name, std::vector<std::string> extra_path)
 
     if (_files.count(name)) {
         auto obj = _files[name].lock();
-        assert(obj);
-        return obj;
-    } else if (f) {
-        auto ef = std::make_shared<file>(*this, f, name);
+        if (obj) {
+            return obj;
+        }
+    }
+    if (f) {
+        trace_elf_load(name.c_str());
+        auto ef = std::shared_ptr<object>(new file(*this, f, name),
+                [=](object *obj) { remove_object(obj); });
         ef->set_base(_next_alloc);
         ef->setprivate(true);
         // We need to push the object at the end of the list (so that the main
         // shared object gets searched before the shared libraries it uses),
         // with one exception: the kernel needs to remain at the end of the
         // list - We want it to behave like a library, not the main program.
-        _modules.insert(std::prev(_modules.end()), ef.get());
-        _modules_adds++;
+        auto old_modules = _modules_rcu.read_by_owner();
+        std::unique_ptr<modules_list> new_modules (
+                new modules_list(*old_modules));
+        new_modules->objects.insert(
+                std::prev(new_modules->objects.end()), ef.get());
+        new_modules->adds++;
+        _modules_rcu.assign(new_modules.release());
+        osv::rcu_dispose(old_modules);
         ef->load_segments();
         _next_alloc = ef->end();
         add_debugger_obj(ef.get());
@@ -856,15 +873,33 @@ program::get_library(std::string name, std::vector<std::string> extra_path)
 
 void program::remove_object(object *ef)
 {
+    SCOPE_LOCK(_mutex);
+    trace_elf_unload(ef->pathname().c_str());
     ef->run_fini_funcs();
     ef->unload_needed();
     del_debugger_obj(ef);
-    _files.erase(ef->pathname());
-    _files.erase(ef->soname());
-    _modules.erase(std::find(_modules.begin(), _modules.end(), ef));
-    _modules_subs++;
-    ef->unload_segments();
-    // Note we don't delete(ef) here - the contrary, delete(ef) calls us.
+    // Note that if we race with get_library() of the same library, we may
+    // find in _files a new copy of the same library, and mustn't remove it.
+    if (_files[ef->pathname()].expired())
+        _files.erase(ef->pathname());
+    if (_files[ef->soname()].expired())
+        _files.erase(ef->soname());
+    auto old_modules = _modules_rcu.read_by_owner();
+    std::unique_ptr<modules_list> new_modules (
+            new modules_list(*old_modules));
+    new_modules->objects.erase(std::find(
+            new_modules->objects.begin(), new_modules->objects.end(), ef));
+    new_modules->subs++;
+    _modules_rcu.assign(new_modules.release());
+    osv::rcu_dispose(old_modules);
+    // We want to unload and delete ef, but need to delay that until no
+    // concurrent dl_iterate_phdr() is still using the modules it got from
+    // modules_get().
+    module_delete_disable();
+    WITH_LOCK(_modules_delete_mutex) {
+        _modules_to_delete.push_back(ef);
+    }
+    module_delete_enable();
 }
 
 object* program::s_objs[100];
@@ -894,35 +929,47 @@ void program::del_debugger_obj(object* obj)
 
 symbol_module program::lookup(const char* name)
 {
-    for (auto module : _modules) {
-        if (auto sym = module->lookup_symbol(name)) {
-            return symbol_module(sym, module);
+    trace_elf_lookup(name);
+    symbol_module ret(nullptr,nullptr);
+    elf::get_program()->with_modules([&](const elf::program::modules_list &ml)
+    {
+        for (auto module : ml.objects) {
+            if (auto sym = module->lookup_symbol(name)) {
+                ret = symbol_module(sym, module);
+                return;
+            }
         }
-    }
-    return symbol_module(nullptr, nullptr);
+    });
+    return ret;
 }
 
 void* program::do_lookup_function(const char* name)
 {
     auto sym = lookup(name);
     if (!sym.symbol) {
-        throw std::runtime_error("symbol not found");
+        throw std::runtime_error("symbol not found " + demangle(name));
     }
     if ((sym.symbol->st_info & 15) != STT_FUNC) {
-        throw std::runtime_error("symbol is not a function");
+        throw std::runtime_error("symbol is not a function " + demangle(name));
     }
     return sym.relocated_addr();
 }
 
 dladdr_info program::lookup_addr(const void* addr)
 {
-    for (auto module : _modules) {
-        auto ret = module->lookup_addr(addr);
-        if (ret.fname) {
-            return ret;
+    trace_elf_lookup_addr(addr);
+    dladdr_info ret;
+    elf::get_program()->with_modules([&](const elf::program::modules_list &ml)
+    {
+        for (auto module : ml.objects) {
+            ret = module->lookup_addr(addr);
+            if (ret.fname) {
+                return;
+            }
         }
-    }
-    return {};
+        ret = {};
+    });
+    return ret;
 }
 
 program* get_program()
@@ -1055,6 +1102,7 @@ init_table get_init(Elf64_Ehdr* header)
 
 ulong program::register_dtv(object* obj)
 {
+    SCOPE_LOCK(_module_index_list_mutex);
     auto i = find(_module_index_list, nullptr);
     if (i != _module_index_list.end()) {
         *i = obj;
@@ -1067,6 +1115,7 @@ ulong program::register_dtv(object* obj)
 
 void program::free_dtv(object* obj)
 {
+    SCOPE_LOCK(_module_index_list_mutex);
     auto i = find(_module_index_list, obj);
     assert(i != _module_index_list.end());
     *i = nullptr;
@@ -1074,7 +1123,64 @@ void program::free_dtv(object* obj)
 
 void* program::tls_addr(ulong module)
 {
+    SCOPE_LOCK(_module_index_list_mutex);
     return _module_index_list[module]->tls_addr();
+}
+
+// Used in implementation of program::with_modules. We cannot keep the RCU
+// read lock (which disables preemption) while a user function is running,
+// so we use this function to make a copy the current list of modules.
+program::modules_list program::modules_get() const
+{
+    modules_list ret;
+    WITH_LOCK(osv::rcu_read_lock) {
+        auto modules = _modules_rcu.read();
+        auto needed = modules->objects.size();
+        while (ret.objects.capacity() < needed) {
+            // tmp isn't large enough to copy the list without allocations,
+            // which are not allowed in rcu critical section.
+            DROP_LOCK(osv::rcu_read_lock) {
+                ret.objects.reserve(needed);
+            }
+            // After re-entering rcu critical section, need to reread
+            modules = _modules_rcu.read();
+            needed = modules->objects.size();
+        }
+        ret.objects.assign(modules->objects.begin(), modules->objects.end());
+        ret.adds = modules->adds;
+        ret.subs = modules->subs;
+    }
+    return ret;
+}
+
+// Prevent actual freeing of modules by remove_object() until the
+// matching modules_delete_enable(). We need this so the user can iterate on
+// the output of dl_iterate_phdr() without fearing that concurrently some
+// of the modules are freed (they can be removed from the search path,
+// but not actually freed).
+void program::module_delete_disable()
+{
+    WITH_LOCK(_modules_delete_mutex) {
+        _module_delete_disable++;
+    }
+}
+
+void program::module_delete_enable()
+{
+    std::vector<object*> to_delete;
+    WITH_LOCK(_modules_delete_mutex) {
+        assert(_module_delete_disable >= 0);
+        if (--_module_delete_disable || _modules_to_delete.empty()) {
+            return;
+        }
+        to_delete = _modules_to_delete;
+        _modules_to_delete.clear();
+    }
+
+    for (auto ef : to_delete) {
+        ef->unload_segments();
+        delete ef;
+    }
 }
 
 }

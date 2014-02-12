@@ -6,10 +6,10 @@
  */
 
 #ifdef __OSV__
-#include "sched.hh"
-#include "mempool.hh"
-#include "mmu.hh"
-#include "barrier.hh"
+#include <osv/sched.hh>
+#include <osv/mempool.hh>
+#include <osv/mmu.hh>
+#include <osv/barrier.hh>
 #endif
 
 #include <sys/mman.h>

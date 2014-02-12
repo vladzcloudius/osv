@@ -5,14 +5,14 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "sched.hh"
+#include <osv/sched.hh>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <osv/poll.h>
 
-#include "debug.hh"
+#include <osv/debug.hh>
 
 #define dbg_d(...)   tprintf_d("tst-sockets", __VA_ARGS__)
 

@@ -29,16 +29,16 @@ public:
     explicit rng(pci::device& dev);
     virtual ~rng();
 
-    virtual const std::string get_name(void) { return "virtio-rng"; }
+    virtual const std::string get_name() { return "virtio-rng"; }
 
-    virtual size_t get_random_bytes(char *buf, size_t size) override;
+    virtual size_t get_random_bytes(char* buf, size_t size) override;
 
     static hw_driver* probe(hw_device* dev);
 
 private:
 
     void handle_irq();
-    void ack_irq();
+    bool ack_irq();
     void worker();
     void refill();
 

@@ -120,10 +120,10 @@ public:
     explicit scsi(pci::device& dev);
     virtual ~scsi();
 
-    virtual const std::string get_name(void) { return _driver_name; }
-    bool read_config();
+    virtual const std::string get_name() { return _driver_name; }
+    void read_config();
 
-    virtual u32 get_driver_features(void);
+    virtual u32 get_driver_features();
 
     static struct scsi_priv *get_priv(struct bio *bio) {
         return reinterpret_cast<struct scsi_priv*>(bio->bio_dev->private_data);
@@ -137,14 +137,17 @@ public:
     void exec_request_sense(u16 taget, u16 lun);
     std::vector<u16> exec_report_luns(u16 target);
     void add_lun(u16 target_id, u16 lun_id);
+    bool test_lun(u16 target_id, u16 lun_id);
     void exec_read_capacity(u16 target, u16 lun, size_t &devsize);
-    void scan(void);
+    void scan();
 
     int exec_readwrite(struct bio *bio, u8 cmd);
     int exec_synccache(struct bio *bio, u8 cmd);
     int exec_cmd(struct bio *bio);
 
     void req_done();
+
+    bool ack_irq();
 
     static hw_driver* probe(hw_device* dev);
 private:
@@ -161,6 +164,7 @@ private:
         void init(struct bio* bio, u16 target, u16 lun)
         {
             memset(&req.cmd, 0, sizeof(req.cmd));
+            req.cmd.tag = reinterpret_cast<u64>(bio);
             req.cmd.lun[0] = 1;
             req.cmd.lun[1] = target;
             req.cmd.lun[2] = (lun >> 8) | 0x40;
@@ -188,6 +192,8 @@ private:
 
     std::string _driver_name;
     scsi_config _config;
+
+    gsi_level_interrupt _gsi;
 
     //maintains the virtio instance number for multiple drives
     static int _instance;

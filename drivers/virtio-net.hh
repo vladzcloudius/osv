@@ -46,7 +46,7 @@ public:
         VIRTIO_NET_F_HOST_UFO = 14,      /* Host can handle UFO in. */
         VIRTIO_NET_F_MRG_RXBUF = 15,      /* Host can merge receive buffers. */
         VIRTIO_NET_F_STATUS = 16,      /* net_config.status available */
-        VIRTIO_NET_F_CTRL_VQ  = 17,      /* Control channel available */
+        VIRTIO_NET_F_CTRL_VQ = 17,      /* Control channel available */
         VIRTIO_NET_F_CTRL_RX = 18,      /* Control channel RX mode support */
         VIRTIO_NET_F_CTRL_VLAN = 19,      /* Control channel VLAN filtering */
         VIRTIO_NET_F_CTRL_RX_EXTRA = 20,   /* Extra RX mode control support */
@@ -56,7 +56,7 @@ public:
     };
 
     enum {
-        VIRTIO_NET_DEVICE_ID=0x1000,
+        VIRTIO_NET_DEVICE_ID = 0x1000,
         VIRTIO_NET_S_LINK_UP = 1,       /* Link is up */
         VIRTIO_NET_S_ANNOUNCE = 2,       /* Announcement is needed */
         VIRTIO_NET_OK = 0,
@@ -129,7 +129,7 @@ public:
      * specify GSO or CSUM features, you can simply ignore the header. */
     struct net_hdr {
         enum {
-            VIRTIO_NET_HDR_F_NEEDS_CSUM  = 1,       // Use csum_start, csum_offset
+            VIRTIO_NET_HDR_F_NEEDS_CSUM = 1,       // Use csum_start, csum_offset
             VIRTIO_NET_HDR_F_DATA_VALID = 2,       // Csum is valid
         };
         u8 flags;
@@ -210,15 +210,17 @@ public:
     explicit net(pci::device& dev);
     virtual ~net();
 
-    virtual const std::string get_name(void) { return _driver_name; }
-    bool read_config();
+    virtual const std::string get_name() { return _driver_name; }
+    void read_config();
 
-    virtual u32 get_driver_features(void);
+    virtual u32 get_driver_features();
 
     void wait_for_queue(vring* queue);
-    bool bad_rx_csum(struct mbuf *m, struct net_hdr *hdr);
+    bool bad_rx_csum(struct mbuf* m, struct net_hdr* hdr);
     void receiver();
     void fill_rx_ring();
+
+    bool ack_irq();
 
     static hw_driver* probe(hw_device* dev);
 
@@ -267,6 +269,8 @@ private:
 
     u32 _hdr_size;
 
+    gsi_level_interrupt _gsi;
+
     struct rxq_stats {
         u64 rx_packets;         // if_ipackets
         u64 rx_bytes;           // if_ibytes
@@ -293,7 +297,7 @@ private:
      /* Single Rx queue object */
     struct rxq {
         rxq(vring* vq, std::function<void ()> poll_func)
-            : vqueue(vq), poll_task(poll_func) {};
+            : vqueue(vq), poll_task(poll_func, sched::thread::attr().name("virtio-net-rx")) {};
         vring* vqueue;
         sched::thread  poll_task;
         struct rxq_stats stats = { 0 };

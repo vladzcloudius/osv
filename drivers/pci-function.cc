@@ -5,8 +5,8 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "debug.hh"
-#include "mmio.hh"
+#include <osv/debug.hh>
+#include <osv/mmio.hh>
 #include "pci.hh"
 #include "device.hh"
 #include "pci-function.hh"
@@ -29,7 +29,7 @@ namespace pci {
 
     }
 
-    void bar::init(void)
+    void bar::init()
     {
         u32 val = _dev->pci_readl(_pos);
 
@@ -55,7 +55,7 @@ namespace pci {
         test_bar_size();
     }
 
-    void bar::test_bar_size(void)
+    void bar::test_bar_size()
     {
         u32 lo_orig = _dev->pci_readl(_pos);
 
@@ -85,23 +85,77 @@ namespace pci {
         _addr_size = ~bits + 1;
     }
 
-    void bar::map(void)
+    void bar::map()
     {
         if (_is_mmio) {
             _addr_mmio = mmio_map(get_addr64(), get_size());
         }
     }
 
-    void bar::unmap(void)
+    void bar::unmap()
     {
         if ((_is_mmio) && (_addr_mmio != mmio_nullptr)) {
             mmio_unmap(_addr_mmio, get_size());
         }
     }
 
-    mmioaddr_t bar::get_mmio(void)
+    mmioaddr_t bar::get_mmio()
     {
-        return (_addr_mmio);
+        return _addr_mmio;
+    }
+
+    u32 bar::readl(u32 offset)
+    {
+        if (is_pio()) {
+            return inl(_addr_lo + offset);
+        } else {
+            return mmio_getl(_addr_mmio + offset);
+        }
+    }
+
+    u16 bar::readw(u32 offset)
+    {
+        if (is_pio()) {
+            return inw(_addr_lo + offset);
+        } else {
+            return mmio_getw(_addr_mmio + offset);
+        }
+    }
+
+    u8 bar::readb(u32 offset)
+    {
+        if (is_pio()) {
+            return inb(_addr_lo + offset);
+        } else {
+            return mmio_getb(_addr_mmio + offset);
+        }
+    }
+
+    void bar::writel(u32 offset, u32 val)
+    {
+        if (is_pio()) {
+            outl(val, _addr_lo + offset);
+        } else {
+            return mmio_setl(_addr_mmio + offset, val);
+        }
+    }
+
+    void bar::writew(u32 offset, u16 val)
+    {
+        if (is_pio()) {
+            outw(val, _addr_lo + offset);
+        } else {
+            return mmio_setw(_addr_mmio + offset, val);
+        }
+    }
+
+    void bar::writeb(u32 offset, u8 val)
+    {
+        if (is_pio()) {
+            outb(val, _addr_lo + offset);
+        } else {
+            return mmio_setb(_addr_mmio + offset, val);
+        }
     }
 
     function::function(u8 bus, u8 device, u8 func)
@@ -117,22 +171,22 @@ namespace pci {
         }
     }
 
-    hw_device_id function::get_id(void)
+    hw_device_id function::get_id()
     {
-        return (hw_device_id(_vendor_id, _device_id));
+        return hw_device_id(_vendor_id, _device_id);
     }
 
-    void function::print(void)
+    void function::print()
     {
         dump_config();
     }
 
-    void function::reset(void)
+    void function::reset()
     {
         // TODO: implement
     }
 
-    bool function::parse_pci_config(void)
+    bool function::parse_pci_config()
     {
         _device_id = pci_readw(PCI_CFG_DEVICE_ID);
         _vendor_id = pci_readw(PCI_CFG_VENDOR_ID);
@@ -148,14 +202,46 @@ namespace pci {
         return parse_ok;
     }
 
-    bool function::parse_pci_capabilities(void)
+    bool function::parse_pci_capabilities()
     {
         // Parse MSI-X
         u8 off = find_capability(PCI_CAP_MSIX);
         if (off != 0xFF) {
             bool msi_ok = parse_pci_msix(off);
-            return (msi_ok);
+            return msi_ok;
         }
+
+        // Parse MSI
+        off = find_capability(PCI_CAP_MSI);
+        if (off != 0xFF) {
+            return parse_pci_msi(off);
+        }
+
+        return true;
+    }
+
+    bool function::parse_pci_msi(u8 off)
+    {
+        // Location within the configuration space
+        _msi.msi_location = off;
+        _msi.msi_ctrl = pci_readw(off + PCIR_MSI_CTRL);
+        // TODO: support multiple MSI message
+        _msi.msi_msgnum = 1;
+
+        if (_msi.msi_ctrl & (1 << 7)) {
+            _msi.is_64_address = true;
+        } else {
+            _msi.is_64_address = false;
+        }
+
+        if (_msi.msi_ctrl & (1 << 8)) {
+            _msi.is_vector_mask = true;
+        } else {
+            _msi.is_vector_mask = false;
+        }
+
+        // We've found an MSI-x capability
+        _have_msi = true;
 
         return true;
     }
@@ -196,66 +282,76 @@ namespace pci {
         _func = func;
     }
 
-    u16 function::get_vendor_id(void)
+    u16 function::get_vendor_id()
     {
-        return (_vendor_id);
+        return _vendor_id;
     }
 
-    u16 function::get_device_id(void)
+    u16 function::get_device_id()
     {
-        return (_device_id);
+        return _device_id;
     }
 
-    u8 function::get_revision_id(void)
+    u8 function::get_revision_id()
     {
-        return (_revision_id);
+        return _revision_id;
     }
 
-    bool function::is_device(void)
+    u8 function::get_base_class_code()
     {
-        return (_header_type == PCI_HDR_TYPE_DEVICE);
+        return _base_class_code;
     }
 
-    bool function::is_bridge(void)
+    u8 function::get_sub_class_code()
     {
-        return (_header_type == PCI_HDR_TYPE_BRIDGE);
+        return _sub_class_code;
     }
 
-    bool function::is_pccard(void)
+    bool function::is_device()
     {
-        return (_header_type == PCI_HDR_TYPE_PCCARD);
+        return _header_type == PCI_HDR_TYPE_DEVICE;
+    }
+
+    bool function::is_bridge()
+    {
+        return _header_type == PCI_HDR_TYPE_BRIDGE;
+    }
+
+    bool function::is_pccard()
+    {
+        return _header_type == PCI_HDR_TYPE_PCCARD;
     }
 
     bool function::is_device(u8 bus, u8 device, u8 function)
     {
         u8 header_type = read_pci_config_byte(bus, device, function,
             PCI_CFG_HEADER_TYPE);
-        return (header_type == PCI_HDR_TYPE_DEVICE);
+        return header_type == PCI_HDR_TYPE_DEVICE;
     }
 
     bool function::is_bridge(u8 bus, u8 device, u8 function)
     {
         u8 header_type = read_pci_config_byte(bus, device, function,
             PCI_CFG_HEADER_TYPE);
-        return (header_type == PCI_HDR_TYPE_BRIDGE);
+        return header_type == PCI_HDR_TYPE_BRIDGE;
     }
 
     bool function::is_pccard(u8 bus, u8 device, u8 function)
     {
         u8 header_type = read_pci_config_byte(bus, device, function,
             PCI_CFG_HEADER_TYPE);
-        return (header_type == PCI_HDR_TYPE_PCCARD);
+        return header_type == PCI_HDR_TYPE_PCCARD;
     }
 
     // Command & Status
-    u16 function::get_command(void)
+    u16 function::get_command()
     {
-        return (pci_readw(PCI_CFG_COMMAND));
+        return pci_readw(PCI_CFG_COMMAND);
     }
 
-    u16 function::get_status(void)
+    u16 function::get_status()
     {
-        return (pci_readw(PCI_CFG_STATUS));
+        return pci_readw(PCI_CFG_STATUS);
     }
 
     void function::set_command(u16 command)
@@ -271,7 +367,7 @@ namespace pci {
     bool function::get_bus_master()
     {
         u16 command = get_command();
-        return (command & PCI_COMMAND_BUS_MASTER);
+        return command & PCI_COMMAND_BUS_MASTER;
     }
 
     void function::set_bus_master(bool master)
@@ -284,29 +380,29 @@ namespace pci {
         set_command(command);
     }
 
-    bool function::is_intx_enabled(void)
+    bool function::is_intx_enabled()
     {
         u16 command = get_command();
-        return ((command & PCI_COMMAND_INTX_DISABLE) == 0);
+        return (command & PCI_COMMAND_INTX_DISABLE) == 0;
     }
 
-    void function::enable_intx(void)
+    void function::enable_intx()
     {
         u16 command = get_command();
         command &= ~PCI_COMMAND_INTX_DISABLE;
         set_command(command);
     }
 
-    void function::disable_intx(void)
+    void function::disable_intx()
     {
         u16 command = get_command();
         command |= PCI_COMMAND_INTX_DISABLE;
         set_command(command);
     }
 
-    u8 function::get_interrupt_line(void)
+    u8 function::get_interrupt_line()
     {
-        return (pci_readb(PCI_CFG_INTERRUPT_LINE));
+        return pci_readb(PCI_CFG_INTERRUPT_LINE);
     }
 
     void function::set_interrupt_line(u8 irq)
@@ -314,26 +410,40 @@ namespace pci {
         pci_writeb(PCI_CFG_INTERRUPT_LINE, irq);
     }
 
-    u8 function::get_interrupt_pin(void)
+    u8 function::get_interrupt_pin()
     {
-        return (pci_readb(PCI_CFG_INTERRUPT_PIN));
+        return pci_readb(PCI_CFG_INTERRUPT_PIN);
     }
 
-    bool function::is_msix(void)
+    bool function::is_msix()
     {
-        return (_have_msix);
+        return _have_msix;
     }
 
-    unsigned function::msix_get_num_entries(void)
+    bool function::is_msi()
+    {
+        return _have_msi;
+    }
+
+    unsigned function::msix_get_num_entries()
     {
         if (!is_msix()) {
-            return (0);
+            return 0;
         }
 
-        return (_msix.msix_msgnum);
+        return _msix.msix_msgnum;
     }
 
-    void function::msix_mask_all(void)
+    unsigned function::msi_get_num_entries()
+    {
+        if (!is_msi()) {
+            return 0;
+        }
+
+        return _msi.msi_msgnum;
+    }
+
+    void function::msix_mask_all()
     {
         if (!is_msix()) {
             return;
@@ -344,7 +454,17 @@ namespace pci {
         msix_set_control(ctrl);
     }
 
-    void function::msix_unmask_all(void)
+    void function::msi_mask_all()
+    {
+        if (!is_msi()) {
+            return;
+        }
+        for (int i = 0; i < _msi.msi_msgnum; i++) {
+            msi_mask_entry(i);
+        }
+    }
+
+    void function::msix_unmask_all()
     {
         if (!is_msix()) {
             return;
@@ -355,14 +475,24 @@ namespace pci {
         msix_set_control(ctrl);
     }
 
+    void function::msi_unmask_all()
+    {
+        if (!is_msi()) {
+            return;
+        }
+        for (int i = 0; i < _msi.msi_msgnum; i++) {
+            msi_unmask_entry(i);
+        }
+    }
+
     bool function::msix_mask_entry(int entry_id)
     {
         if (!is_msix()) {
-            return (false);
+            return false;
         }
 
         if (entry_id >= _msix.msix_msgnum) {
-            return (false);
+            return false;
         }
 
         mmioaddr_t entryaddr = msix_get_table() + (entry_id * MSIX_ENTRY_SIZE);
@@ -372,17 +502,46 @@ namespace pci {
         ctrl_data |= (1 << MSIX_ENTRY_CONTROL_MASK_BIT);
         mmio_setl(ctrl, ctrl_data);
 
-        return (true);
+        return true;
+    }
+
+    bool function::msi_mask_entry(int entry_id)
+    {
+        if (!is_msi()) {
+            return false;
+        }
+
+        if (entry_id >= _msi.msi_msgnum) {
+            return false;
+        }
+
+        // Per-vector mask enabled?
+        if (_msi.is_vector_mask) {
+            // 64 bits address enabled?
+            if (_msi.is_64_address) {
+                auto reg = _msi.msi_location + PCIR_MSI_MASK_64;
+                auto mask = pci_readl(reg);
+                mask |= 1 << entry_id;
+                pci_writel(reg, mask);
+            } else {
+                auto reg = _msi.msi_location + PCIR_MSI_MASK_32;
+                auto mask = pci_readl(reg);
+                mask |= 1 << entry_id;
+                pci_writel(reg, mask);
+            }
+        }
+
+        return true;
     }
 
     bool function::msix_unmask_entry(int entry_id)
     {
         if (!is_msix()) {
-            return (false);
+            return false;
         }
 
         if (entry_id >= _msix.msix_msgnum) {
-            return (false);
+            return false;
         }
 
         mmioaddr_t entryaddr = msix_get_table() + (entry_id * MSIX_ENTRY_SIZE);
@@ -392,17 +551,46 @@ namespace pci {
         ctrl_data &= ~(1 << MSIX_ENTRY_CONTROL_MASK_BIT);
         mmio_setl(ctrl, ctrl_data);
 
-        return (true);
+        return true;
+    }
+
+    bool function::msi_unmask_entry(int entry_id)
+    {
+        if (!is_msi()) {
+            return false;
+        }
+
+        if (entry_id >= _msi.msi_msgnum) {
+            return false;
+        }
+
+        // Per-vector mask enabled?
+        if (_msi.is_vector_mask) {
+            // 64 bits address enabled?
+            if (_msi.is_64_address) {
+                auto reg = _msi.msi_location + PCIR_MSI_MASK_64;
+                auto mask = pci_readl(reg);
+                mask &= ~(1 << entry_id);
+                pci_writel(reg, mask);
+            } else {
+                auto reg = _msi.msi_location + PCIR_MSI_MASK_32;
+                auto mask = pci_readl(reg);
+                mask &= ~(1 << entry_id);
+                pci_writel(reg, mask);
+            }
+        }
+
+        return true;
     }
 
     bool function::msix_write_entry(int entry_id, u64 address, u32 data)
     {
         if (!is_msix()) {
-            return (false);
+            return false;
         }
 
         if (entry_id >= _msix.msix_msgnum) {
-            return (false);
+            return false;
         }
 
         mmioaddr_t entryaddr = msix_get_table() + (entry_id * MSIX_ENTRY_SIZE);
@@ -410,10 +598,33 @@ namespace pci {
         mmio_setq(entryaddr + (u8)MSIX_ENTRY_ADDR, address);
         mmio_setl(entryaddr + (u8)MSIX_ENTRY_DATA, data);
 
-        return (true);
+        return true;
     }
 
-    void function::msix_enable(void)
+    bool function::msi_write_entry(int entry_id, u64 address, u32 data)
+    {
+        if (!is_msi()) {
+            return false;
+        }
+
+        if (entry_id >= _msi.msi_msgnum) {
+            return false;
+        }
+
+        // 64 Bit message address enabled ?
+        if (_msi.is_64_address) {
+            pci_writel(_msi.msi_location + PCIR_MSI_ADDR, address & 0xFFFFFFFF);
+            pci_writel(_msi.msi_location + PCIR_MSI_UADDR, address >> 32);
+            pci_writel(_msi.msi_location + PCIR_MSI_DATA_64, data);
+        } else {
+            pci_writel(_msi.msi_location + PCIR_MSI_ADDR, address & 0xFFFFFFFF);
+            pci_writel(_msi.msi_location + PCIR_MSI_DATA_32, data);
+        }
+
+        return true;
+    }
+
+    void function::msix_enable()
     {
         if (!is_msix()) {
             return;
@@ -450,7 +661,30 @@ namespace pci {
         _msix_enabled = true;
     }
 
-    void function::msix_disable(void)
+    void function::msi_enable()
+    {
+        if (!is_msi()) {
+            return;
+        }
+
+        // Disabled intx assertions which is turned on by default
+        disable_intx();
+
+        u16 ctrl = msi_get_control();
+        ctrl |= PCIR_MSI_CTRL_ME;
+
+        // Mask all individual entries
+        for (int i = 0; i< _msi.msi_msgnum; i++) {
+            msi_mask_entry(i);
+        }
+
+        msi_set_control(ctrl);
+
+        _msi_enabled = true;
+    }
+
+
+    void function::msix_disable()
     {
         if (!is_msix()) {
             return;
@@ -463,25 +697,48 @@ namespace pci {
         _msix_enabled = false;
     }
 
+    void function::msi_disable()
+    {
+        if (!is_msi()) {
+            return;
+        }
+
+        u16 ctrl = msi_get_control();
+        ctrl &= ~PCIR_MSI_CTRL_ME;
+        msix_set_control(ctrl);
+
+        _msi_enabled = false;
+    }
+
     void function::msix_set_control(u16 ctrl)
     {
         pci_writew(_msix.msix_location + PCIR_MSIX_CTRL, ctrl);
     }
 
-    u16 function::msix_get_control(void)
+    void function::msi_set_control(u16 ctrl)
     {
-        return (pci_readw(_msix.msix_location + PCIR_MSIX_CTRL));
+        pci_writew(_msi.msi_location + PCIR_MSI_CTRL, ctrl);
     }
 
-    mmioaddr_t function::msix_get_table(void)
+    u16 function::msix_get_control()
+    {
+        return pci_readw(_msix.msix_location + PCIR_MSIX_CTRL);
+    }
+
+    u16 function::msi_get_control()
+    {
+        return pci_readw(_msi.msi_location + PCIR_MSI_CTRL);
+    }
+
+    mmioaddr_t function::msix_get_table()
     {
         bar* msix_bar = get_bar(_msix.msix_table_bar + 1);
         if (msix_bar == nullptr) {
-            return (mmio_nullptr);
+            return mmio_nullptr;
         }
 
-        return ( reinterpret_cast<mmioaddr_t>(msix_bar->get_mmio() +
-                                              _msix.msix_table_offset) );
+        return reinterpret_cast<mmioaddr_t>(msix_bar->get_mmio() +
+                                              _msix.msix_table_offset);
     }
 
     u8 function::pci_readb(u8 offset)
@@ -526,29 +783,29 @@ namespace pci {
             // Read capability
             u8 capability = pci_readb(off + PCI_CAP_OFF_ID);
             if (capability == cap_id) {
-                return (off);
+                return off;
             }
 
             ctr++;
             if (ctr > max_capabilities) {
-                return (bad_offset);
+                return bad_offset;
             }
 
             // Next
             off = pci_readb(off + PCI_CAP_OFF_NEXT);
         }
 
-        return (bad_offset);
+        return bad_offset;
     }
 
     bar * function::get_bar(int idx)
     {
         auto it = _bars.find(idx);
         if (it == _bars.end()) {
-            return (nullptr);
+            return nullptr;
         }
 
-        return (it->second);
+        return it->second;
     }
 
     void function::add_bar(int idx, bar * bar)
@@ -556,7 +813,7 @@ namespace pci {
         _bars.insert(std::make_pair(idx, bar));
     }
 
-    void function::dump_config(void)
+    void function::dump_config()
     {
         pci_d("[%x:%x.%x] vid:id = %x:%x",
             (u16)_bus, (u16)_device, (u16)_func, _vendor_id, _device_id);

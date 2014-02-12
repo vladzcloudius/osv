@@ -3,8 +3,8 @@ import mmap
 import struct
 import sys
 
-
-_format_version = 1
+# version 2 introduced thread_name
+_format_version = 2
 
 def nanos_to_millis(nanos):
     return float(nanos) / 1000000
@@ -25,6 +25,10 @@ class BacktraceFormatter:
     def __call__(self, backtrace):
         if not backtrace:
             return ''
+
+        while self.resolver(backtrace[0] - 1).startswith("tracepoint"):
+            backtrace.pop(0)
+
         return '   [' + ', '.join((str(self.resolver(x - 1)) for x in backtrace if x)) + ']'
 
 def simple_symbol_formatter(addr):
@@ -79,9 +83,10 @@ class TracePoint:
                 self.format)
 
 class Trace:
-    def __init__(self, tp, thread, time, cpu, data, backtrace=None):
+    def __init__(self, tp, thread, thread_name, time, cpu, data, backtrace=None):
         self.tp = tp
         self.thread = thread
+        self.thread_name = thread_name
         self.time = time
         self.cpu = cpu
         self.data = data
@@ -97,8 +102,9 @@ class Trace:
         return format % self.data
 
     def format(self, bt_formatter=default_backtrace_formatter):
-        return '0x%016x %2d %19s %-20s %s%s' % (
+        return '0x%016x %-15s %2d %19s %-20s %s%s' % (
             self.thread,
+            self.thread_name,
             self.cpu,
             format_time(self.time),
             self.name,
@@ -116,6 +122,10 @@ class TimedTrace:
     @property
     def duration(self):
         return self.duration
+
+    @property
+    def time(self):
+        return self.trace.time
 
     @property
     def time_range(self):
@@ -172,7 +182,8 @@ def read(buffer_view):
             unpacker.unpack_str(), unpacker.unpack_str())
 
     while unpacker:
-        tp_key, thread, time, cpu = unpacker.unpack('QQQI')
+        tp_key, thread, thread_name, time, cpu = unpacker.unpack('QQ16sQI')
+        thread_name = thread_name.rstrip('\0')
         tp = tracepoints[tp_key]
 
         backtrace = []
@@ -183,7 +194,7 @@ def read(buffer_view):
             backtrace.append(frame)
 
         data = unpacker.unpack(tp.signature)
-        yield Trace(tp, thread, time, cpu, data, backtrace=backtrace)
+        yield Trace(tp, thread, thread_name, time, cpu, data, backtrace=backtrace)
 
 def write(traces, writer):
     packer = WritingPacker(writer)
@@ -196,7 +207,8 @@ def write(traces, writer):
         packer.pack_str(tp.name, tp.signature, tp.format)
 
     for trace in traces:
-        packer.pack('QQQI', trace.tp.key, trace.thread, trace.time, trace.cpu)
+        packer.pack('QQ16sQI', trace.tp.key, trace.thread, trace.thread_name,
+                    trace.time, trace.cpu)
 
         if trace.backtrace:
             for frame in filter(None, trace.backtrace):

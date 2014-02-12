@@ -702,8 +702,11 @@ int chdir(const char *pathname)
     if (pathname == NULL)
         goto out_errno;
 
+    if ((error = task_conv(t, pathname, VREAD, path)) != 0)
+        goto out_errno;
+
     /* Check if directory exits */
-    error = sys_open(path, O_RDONLY, 0, &fp);
+    error = sys_open(path, O_DIRECTORY, 0, &fp);
     if (error) {
         goto out_errno;
     }
@@ -718,8 +721,8 @@ int chdir(const char *pathname)
     trace_vfs_chdir_ret();
     return 0;
     out_errno:
-    trace_vfs_chdir_err(errno);
     errno = error;
+    trace_vfs_chdir_err(errno);
     return -1;
 }
 
@@ -1161,6 +1164,12 @@ int fcntl(int fd, int cmd, int arg)
         fp->ioctl(FIOASYNC, &tmp);
 
         break;
+    case F_SETLK:
+        WARN_ONCE("fcntl(F_SETLK) stubbed\n");
+        break;
+    case F_GETLK:
+        WARN_ONCE("fcntl(F_GETLK) stubbed\n");
+        break;
     default:
         kprintf("unsupported fcntl cmd 0x%x\n", cmd);
         error = EINVAL;
@@ -1413,6 +1422,28 @@ int chmod(const char *pathname, mode_t mode)
     return 0;
 }
 
+TRACEPOINT(trace_vfs_fchmod, "\"%d\" 0%0o", int, mode_t);
+TRACEPOINT(trace_vfs_fchmod_ret, "");
+
+int fchmod(int fd, mode_t mode)
+{
+    trace_vfs_fchmod(fd, mode);
+    WARN_STUBBED();
+    trace_vfs_fchmod_ret();
+    return 0;
+}
+
+TRACEPOINT(trace_vfs_fchown, "\"%d\" %d %d", int, uid_t, gid_t);
+TRACEPOINT(trace_vfs_fchown_ret, "");
+
+int fchown(int fd, uid_t owner, gid_t group)
+{
+    trace_vfs_fchown(fd, owner, group);
+    WARN_STUBBED();
+    trace_vfs_fchown_ret();
+    return 0;
+}
+
 NO_SYS(int fchmodat(int dirfd, const char *pathname, mode_t mode, int flags));
 
 mode_t umask(mode_t newmask)
@@ -1560,6 +1591,12 @@ extern "C" void unmount_rootfs(void)
     int ret;
 
     sys_umount("/dev");
+
+    ret = sys_umount("/proc");
+    if (ret) {
+        kprintf("Warning: unmount_rootfs: failed to unmount /proc, "
+            "error = %s\n", strerror(ret));
+    }
 
     ret = sys_umount2("/", MNT_FORCE);
     if (ret) {

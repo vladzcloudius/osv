@@ -6,6 +6,7 @@
  * Copyright (c) 2009 Doug F. Rabson, Citrix
  * Copyright (c) 2005 Kip Macy
  * Copyright (c) 2003-2004, Keir Fraser & Steve Hand
+ * Copyright (c) 2014, Glauber Costa, Cloudius Systems
  * Modifications by Mark A. Williamson are (c) Intel Research Cambridge
  *
  *
@@ -33,19 +34,21 @@
 #ifndef __XEN_DRIVERS_BLOCK_H__
 #define __XEN_DRIVERS_BLOCK_H__
 #include <xen/blkif.h>
+#include <list>
+#include <osv/condvar.h>
 
 /**
  * Given a number of blkif segments, compute the maximum I/O size supported.
  *
- * \note This calculation assumes that all but the first and last segments 
+ * \note This calculation assumes that all but the first and last segments
  *       of the I/O are fully utilized.
  *
  * \note We reserve a segement from the maximum supported by the transport to
  *       guarantee we can handle an unaligned transfer without the need to
  *       use a bounce buffer.
  */
-#define	XBF_SEGS_TO_SIZE(segs)						\
-	(((segs) - 1) * PAGE_SIZE)
+#define    XBF_SEGS_TO_SIZE(segs)                        \
+    (((segs) - 1) * PAGE_SIZE)
 
 /**
  * Compute the maximum number of blkif segments requried to represent
@@ -57,226 +60,232 @@
  * \note We reserve a segement to guarantee we can handle an unaligned
  *       transfer without the need to use a bounce buffer.
  */
-#define	XBF_SIZE_TO_SEGS(size)						\
-	((size / PAGE_SIZE) + 1)
+#define    XBF_SIZE_TO_SEGS(size)                        \
+    ((size / PAGE_SIZE) + 1)
 
 /**
  * The maximum number of outstanding requests blocks (request headers plus
  * additional segment blocks) we will allow in a negotiated block-front/back
  * communication channel.
  */
-#define XBF_MAX_REQUESTS		256
+#define XBF_MAX_REQUESTS        256
 
 /**
  * The maximum mapped region size per request we will allow in a negotiated
  * block-front/back communication channel.
  */
-#define	XBF_MAX_REQUEST_SIZE						\
-	MIN(MAXPHYS, XBF_SEGS_TO_SIZE(BLKIF_MAX_SEGMENTS_PER_REQUEST))
+#define    XBF_MAX_REQUEST_SIZE                        \
+    MIN(MAXPHYS, XBF_SEGS_TO_SIZE(BLKIF_MAX_SEGMENTS_PER_REQUEST))
 
 /**
  * The maximum number of segments (within a request header and accompanying
  * segment blocks) per request we will allow in a negotiated block-front/back
  * communication channel.
  */
-#define	XBF_MAX_SEGMENTS_PER_REQUEST					\
-	(MIN(BLKIF_MAX_SEGMENTS_PER_REQUEST,				\
-	     XBF_SIZE_TO_SEGS(XBF_MAX_REQUEST_SIZE)))
+#define    XBF_MAX_SEGMENTS_PER_REQUEST                    \
+    (MIN(BLKIF_MAX_SEGMENTS_PER_REQUEST,                \
+         XBF_SIZE_TO_SEGS(XBF_MAX_REQUEST_SIZE)))
 
 /**
  * The maximum number of shared memory ring pages we will allow in a
  * negotiated block-front/back communication channel.  Allow enough
  * ring space for all requests to be  XBF_MAX_REQUEST_SIZE'd.
  */
-#define XBF_MAX_RING_PAGES						    \
-	BLKIF_RING_PAGES(BLKIF_SEGS_TO_BLOCKS(XBF_MAX_SEGMENTS_PER_REQUEST) \
-		       * XBF_MAX_REQUESTS)
+#define XBF_MAX_RING_PAGES                            \
+    BLKIF_RING_PAGES(BLKIF_SEGS_TO_BLOCKS(XBF_MAX_SEGMENTS_PER_REQUEST) \
+               * XBF_MAX_REQUESTS)
 
 struct xlbd_type_info
 {
-	int partn_shift;
-	int disks_per_major;
-	char *devname;
-	char *diskname;
+    int partn_shift;
+    int disks_per_major;
+    char *devname;
+    char *diskname;
 };
 
 struct xlbd_major_info
 {
-	int major;
-	int index;
-	int usage;
-	struct xlbd_type_info *type;
+    int major;
+    int index;
+    int usage;
+    struct xlbd_type_info *type;
 };
 
 struct xb_command {
-	TAILQ_ENTRY(xb_command)	cm_link;
-	struct xb_softc		*cm_sc;
-	u_int			cm_flags;
-#define XB_CMD_FROZEN		(1<<0)
-#define XB_CMD_POLLED		(1<<1)
-#define XB_ON_XBQ_FREE		(1<<2)
-#define XB_ON_XBQ_READY		(1<<3)
-#define XB_ON_XBQ_BUSY		(1<<4)
-#define XB_ON_XBQ_COMPLETE	(1<<5)
-#define XB_ON_XBQ_MASK		((1<<2)|(1<<3)|(1<<4)|(1<<5))
-	bus_dmamap_t		map;
-	uint64_t		id;
-	grant_ref_t		*sg_refs;
-	struct bio		*bp;
-	grant_ref_t		gref_head;
-	void			*data;
-	size_t			datalen;
-	u_int			nseg;
-	int			operation;
-	blkif_sector_t		sector_number;
-	int			status;
-	void			(* cm_complete)(struct xb_command *);
+    TAILQ_ENTRY(xb_command)    cm_link;
+    struct xb_softc        *cm_sc;
+    u_int            cm_flags;
+#define XB_CMD_FROZEN       (1<<0)
+#define XB_CMD_POLLED       (1<<1)
+#define XB_ON_XBQ_FREE      (1<<2)
+#define XB_ON_XBQ_READY     (1<<3)
+#define XB_ON_XBQ_BUSY      (1<<4)
+#define XB_ON_XBQ_COMPLETE  (1<<5)
+#define XB_ON_XBQ_MASK      ((1<<2)|(1<<3)|(1<<4)|(1<<5))
+    bus_dmamap_t        map;
+    uint64_t        id;
+    grant_ref_t        *sg_refs;
+    struct bio        *bp;
+    grant_ref_t        gref_head;
+    void            *data;
+    size_t            datalen;
+    u_int            nseg;
+    int            operation;
+    blkif_sector_t        sector_number;
+    int            status;
+    void            (* cm_complete)(struct xb_command *);
 };
 
-#define XBQ_FREE	0
-#define XBQ_BIO		1
-#define XBQ_READY	2
-#define XBQ_BUSY	3
-#define XBQ_COMPLETE	4
-#define XBQ_COUNT	5
+#define XBQ_FREE        0
+#define XBQ_BIO         1
+#define XBQ_READY       2
+#define XBQ_BUSY        3
+#define XBQ_COMPLETE    4
+#define XBQ_COUNT       5
 
 struct xb_qstat {
-	uint32_t	q_length;
-	uint32_t	q_max;
+    uint32_t    q_length;
+    uint32_t    q_max;
 };
 
 union xb_statrequest {
-	uint32_t		ms_item;
-	struct xb_qstat		ms_qstat;
+    uint32_t        ms_item;
+    struct xb_qstat        ms_qstat;
 };
 
 /*
  * We have one of these per vbd, whether ide, scsi or 'other'.
  */
 struct xb_softc {
-	device_t		xb_dev;
-	struct disk		*xb_disk;		/* disk params */
-	struct bio_queue_head   xb_bioq;		/* sort queue */
-	int			xb_unit;
-	int			xb_flags;
-#define XB_OPEN		(1<<0)		/* drive is open (can't shut down) */
-#define XB_BARRIER	(1 << 1)	/* backend supports barriers */
-#define XB_READY	(1 << 2)	/* Is ready */
-#define XB_FROZEN	(1 << 3)	/* Waiting for resources */
-#define XB_FLUSH	(1 << 4)	/* backend supports flushes */
-	int			vdevice;
-	int			connected;
-	u_int			ring_pages;
-	uint32_t		max_requests;
-	uint32_t		max_request_segments;
-	uint32_t		max_request_blocks;
-	uint32_t		max_request_size;
-	grant_ref_t		ring_ref[XBF_MAX_RING_PAGES];
-	blkif_front_ring_t	ring;
-	unsigned int		irq;
-	struct gnttab_free_callback	callback;
-	TAILQ_HEAD(,xb_command)	cm_free;
-	TAILQ_HEAD(,xb_command)	cm_ready;
-	TAILQ_HEAD(,xb_command)	cm_busy;
-	TAILQ_HEAD(,xb_command)	cm_complete;
-	struct xb_qstat		xb_qstat[XBQ_COUNT];
-	bus_dma_tag_t		xb_io_dmat;
+    device_t        xb_dev;
+    struct disk        *xb_disk;        /* disk params */
+    int            xb_unit;
+    int            xb_flags;
+#define XB_OPEN         (1 << 0)    /* drive is open (can't shut down) */
+#define XB_BARRIER      (1 << 1)    /* backend supports barriers */
+#define XB_READY        (1 << 2)    /* Is ready */
+#define XB_FROZEN       (1 << 3)    /* Waiting for resources */
+#define XB_FLUSH        (1 << 4)    /* backend supports flushes */
+    int            vdevice;
+    int            connected;
+    u_int            ring_pages;
+    uint32_t        max_requests;
+    uint32_t        max_request_segments;
+    uint32_t        max_request_blocks;
+    uint32_t        max_request_size;
+    grant_ref_t        ring_ref[XBF_MAX_RING_PAGES];
+    blkif_front_ring_t    ring;
+    unsigned int        irq;
+    struct gnttab_free_callback    callback;
+    TAILQ_HEAD(,xb_command)    cm_free;
+    TAILQ_HEAD(,xb_command)    cm_ready;
+    TAILQ_HEAD(,xb_command)    cm_busy;
+    TAILQ_HEAD(,xb_command)    cm_complete;
+    struct xb_qstat        xb_qstat[XBQ_COUNT];
+    bus_dma_tag_t        xb_io_dmat;
 
-	/**
-	 * The number of people holding this device open.  We won't allow a
-	 * hot-unplug unless this is 0.
-	 */
-	int			users;
-	struct mtx		xb_io_lock;
+    /**
+     * The number of people holding this device open.  We won't allow a
+     * hot-unplug unless this is 0.
+     */
+    int            users;
 
-	struct xb_command      *shadow;
+    struct xb_command      *shadow;
+};
+
+class bf_softc {
+public:
+    struct xb_softc sc;
+    std::list<struct bio *> _bio_queue;
+    condvar _bio_queue_waiters;
+    mutex   xb_io_lock;
 };
 
 int xlvbd_add(struct xb_softc *, blkif_sector_t sectors, int device,
-	      uint16_t vdisk_info, unsigned long sector_size);
+          uint16_t vdisk_info, unsigned long sector_size);
 void xlvbd_del(struct xb_softc *);
 
-#define XBQ_ADD(sc, qname)					\
-	do {							\
-		struct xb_qstat *qs;				\
-								\
-		qs = &(sc)->xb_qstat[qname];			\
-		qs->q_length++;					\
-		if (qs->q_length > qs->q_max)			\
-			qs->q_max = qs->q_length;		\
-	} while (0)
+#define XBQ_ADD(sc, qname)                    \
+    do {                            \
+        struct xb_qstat *qs;                \
+                                \
+        qs = &(sc)->xb_qstat[qname];            \
+        qs->q_length++;                    \
+        if (qs->q_length > qs->q_max)            \
+            qs->q_max = qs->q_length;        \
+    } while (0)
 
-#define XBQ_REMOVE(sc, qname)	(sc)->xb_qstat[qname].q_length--
+#define XBQ_REMOVE(sc, qname)    (sc)->xb_qstat[qname].q_length--
 
-#define XBQ_INIT(sc, qname)					\
-	do {							\
-		sc->xb_qstat[qname].q_length = 0;		\
-		sc->xb_qstat[qname].q_max = 0;			\
-	} while (0)
+#define XBQ_INIT(sc, qname)                    \
+    do {                            \
+        sc->xb_qstat[qname].q_length = 0;        \
+        sc->xb_qstat[qname].q_max = 0;            \
+    } while (0)
 
-#define XBQ_COMMAND_QUEUE(name, index)					\
-	static __inline void						\
-	xb_initq_ ## name (struct xb_softc *sc)				\
-	{								\
-		TAILQ_INIT(&sc->cm_ ## name);				\
-		XBQ_INIT(sc, index);					\
-	}								\
-	static __inline void						\
-	xb_enqueue_ ## name (struct xb_command *cm)			\
-	{								\
-		if ((cm->cm_flags & XB_ON_XBQ_MASK) != 0) {		\
-			printf("command %p is on another queue, "	\
-			    "flags = %#x\n", cm, cm->cm_flags);		\
-			panic("command is on another queue");		\
-		}							\
-		TAILQ_INSERT_TAIL(&cm->cm_sc->cm_ ## name, cm, cm_link); \
-		cm->cm_flags |= XB_ON_ ## index;			\
-		XBQ_ADD(cm->cm_sc, index);				\
-	}								\
-	static __inline void						\
-	xb_requeue_ ## name (struct xb_command *cm)			\
-	{								\
-		if ((cm->cm_flags & XB_ON_XBQ_MASK) != 0) {		\
-			printf("command %p is on another queue, "	\
-			    "flags = %#x\n", cm, cm->cm_flags);		\
-			panic("command is on another queue");		\
-		}							\
-		TAILQ_INSERT_HEAD(&cm->cm_sc->cm_ ## name, cm, cm_link); \
-		cm->cm_flags |= XB_ON_ ## index;			\
-		XBQ_ADD(cm->cm_sc, index);				\
-	}								\
-	static __inline struct xb_command *				\
-	xb_dequeue_ ## name (struct xb_softc *sc)			\
-	{								\
-		struct xb_command *cm;					\
-									\
-		if ((cm = TAILQ_FIRST(&sc->cm_ ## name)) != NULL) {	\
-			if ((cm->cm_flags & XB_ON_XBQ_MASK) !=		\
-			     XB_ON_ ## index) {				\
-				printf("command %p not in queue, "	\
-				    "flags = %#x, bit = %#x\n", cm,	\
-				    cm->cm_flags, XB_ON_ ## index);	\
-				panic("command not in queue");		\
-			}						\
-			TAILQ_REMOVE(&sc->cm_ ## name, cm, cm_link);	\
-			cm->cm_flags &= ~XB_ON_ ## index;		\
-			XBQ_REMOVE(sc, index);				\
-		}							\
-		return (cm);						\
-	}								\
-	static __inline void						\
-	xb_remove_ ## name (struct xb_command *cm)			\
-	{								\
-		if ((cm->cm_flags & XB_ON_XBQ_MASK) != XB_ON_ ## index){\
-			printf("command %p not in queue, flags = %#x, " \
-			    "bit = %#x\n", cm, cm->cm_flags,		\
-			    XB_ON_ ## index);				\
-			panic("command not in queue");			\
-		}							\
-		TAILQ_REMOVE(&cm->cm_sc->cm_ ## name, cm, cm_link);	\
-		cm->cm_flags &= ~XB_ON_ ## index;			\
-		XBQ_REMOVE(cm->cm_sc, index);				\
-	}								\
+#define XBQ_COMMAND_QUEUE(name, index)                    \
+    static __inline void                        \
+    xb_initq_ ## name (struct xb_softc *sc)                \
+    {                                \
+        TAILQ_INIT(&sc->cm_ ## name);                \
+        XBQ_INIT(sc, index);                    \
+    }                                \
+    static __inline void                        \
+    xb_enqueue_ ## name (struct xb_command *cm)            \
+    {                                \
+        if ((cm->cm_flags & XB_ON_XBQ_MASK) != 0) {        \
+            printf("command %p is on another queue, "    \
+                "flags = %#x\n", cm, cm->cm_flags);        \
+            panic("command is on another queue");        \
+        }                            \
+        TAILQ_INSERT_TAIL(&cm->cm_sc->cm_ ## name, cm, cm_link); \
+        cm->cm_flags |= XB_ON_ ## index;            \
+        XBQ_ADD(cm->cm_sc, index);                \
+    }                                \
+    static __inline void                        \
+    xb_requeue_ ## name (struct xb_command *cm)            \
+    {                                \
+        if ((cm->cm_flags & XB_ON_XBQ_MASK) != 0) {        \
+            printf("command %p is on another queue, "    \
+                "flags = %#x\n", cm, cm->cm_flags);        \
+            panic("command is on another queue");        \
+        }                            \
+        TAILQ_INSERT_HEAD(&cm->cm_sc->cm_ ## name, cm, cm_link); \
+        cm->cm_flags |= XB_ON_ ## index;            \
+        XBQ_ADD(cm->cm_sc, index);                \
+    }                                \
+    static __inline struct xb_command *                \
+    xb_dequeue_ ## name (struct xb_softc *sc)            \
+    {                                \
+        struct xb_command *cm;                    \
+                                    \
+        if ((cm = TAILQ_FIRST(&sc->cm_ ## name)) != NULL) {    \
+            if ((cm->cm_flags & XB_ON_XBQ_MASK) !=        \
+                 XB_ON_ ## index) {                \
+                printf("command %p not in queue, "    \
+                    "flags = %#x, bit = %#x\n", cm,    \
+                    cm->cm_flags, XB_ON_ ## index);    \
+                panic("command not in queue");        \
+            }                        \
+            TAILQ_REMOVE(&sc->cm_ ## name, cm, cm_link);    \
+            cm->cm_flags &= ~XB_ON_ ## index;        \
+            XBQ_REMOVE(sc, index);                \
+        }                            \
+        return (cm);                        \
+    }                                \
+    static __inline void                        \
+    xb_remove_ ## name (struct xb_command *cm)            \
+    {                                \
+        if ((cm->cm_flags & XB_ON_XBQ_MASK) != XB_ON_ ## index){\
+            printf("command %p not in queue, flags = %#x, " \
+                "bit = %#x\n", cm, cm->cm_flags,        \
+                XB_ON_ ## index);                \
+            panic("command not in queue");            \
+        }                            \
+        TAILQ_REMOVE(&cm->cm_sc->cm_ ## name, cm, cm_link);    \
+        cm->cm_flags &= ~XB_ON_ ## index;            \
+        XBQ_REMOVE(cm->cm_sc, index);                \
+    }                                \
 struct hack
 
 XBQ_COMMAND_QUEUE(free, XBQ_FREE);
@@ -287,34 +296,40 @@ XBQ_COMMAND_QUEUE(complete, XBQ_COMPLETE);
 static __inline void
 xb_initq_bio(struct xb_softc *sc)
 {
-	bioq_init(&sc->xb_bioq);
-	XBQ_INIT(sc, XBQ_BIO);
 }
 
 static __inline void
 xb_enqueue_bio(struct xb_softc *sc, struct bio *bp)
 {
-	bioq_insert_tail(&sc->xb_bioq, bp);
-	XBQ_ADD(sc, XBQ_BIO);
+    bf_softc *bf = reinterpret_cast<bf_softc *>(sc);
+
+    bf->_bio_queue_waiters.wait_until(bf->xb_io_lock,
+        [&] { return (bf->_bio_queue.size() < bf->sc.max_requests);
+    });
+
+    bf->_bio_queue.push_back(bp);
 }
 
 static __inline void
 xb_requeue_bio(struct xb_softc *sc, struct bio *bp)
 {
-	bioq_insert_head(&sc->xb_bioq, bp);
-	XBQ_ADD(sc, XBQ_BIO);
+    bf_softc *bf = reinterpret_cast<bf_softc *>(sc);
+    bf->_bio_queue.push_front(bp);
 }
 
 static __inline struct bio *
 xb_dequeue_bio(struct xb_softc *sc)
 {
-	struct bio *bp;
+    struct bio *bp;
 
-	if ((bp = bioq_first(&sc->xb_bioq)) != NULL) {
-		bioq_remove(&sc->xb_bioq, bp);
-		XBQ_REMOVE(sc, XBQ_BIO);
-	}
-	return (bp);
+    bf_softc *bf = reinterpret_cast<bf_softc *>(sc);
+    if (bf->_bio_queue.empty()) {
+        return nullptr;
+    }
+
+    bp = bf->_bio_queue.front();
+    bf->_bio_queue.pop_front();
+    return (bp);
 }
 
 #endif /* __XEN_DRIVERS_BLOCK_H__ */

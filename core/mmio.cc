@@ -6,8 +6,8 @@
  */
 
 #include <osv/types.h>
-#include "mmu.hh"
-#include "mmio.hh"
+#include <osv/mmu.hh>
+#include <osv/mmio.hh>
 
 using namespace mmu;
 

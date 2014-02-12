@@ -11,10 +11,10 @@
 #include "drivers/virtio.hh"
 #include "drivers/virtio-blk.hh"
 #include "drivers/pci-device.hh"
-#include "interrupt.hh"
+#include <osv/interrupt.hh>
 
-#include "mempool.hh"
-#include "mmu.hh"
+#include <osv/mempool.hh>
+#include <osv/mmu.hh>
 
 #include <string>
 #include <string.h>
@@ -22,10 +22,8 @@
 #include <errno.h>
 #include <osv/debug.h>
 
-#include "sched.hh"
+#include <osv/sched.hh>
 #include "osv/trace.hh"
-#include "drivers/clock.hh"
-#include "drivers/clockevent.hh"
 
 #include <osv/device.h>
 #include <osv/bio.h>
@@ -100,6 +98,20 @@ struct driver blk_driver = {
     sizeof(struct blk_priv),
 };
 
+bool blk::ack_irq()
+{
+    auto isr = virtio_conf_readb(VIRTIO_PCI_ISR);
+    auto queue = get_virt_queue(0);
+
+    if (isr) {
+        queue->disable_interrupts();
+        return true;
+    } else {
+        return false;
+    }
+
+}
+
 blk::blk(pci::device& pci_dev)
     : virtio_driver(pci_dev), _ro(false)
 {
@@ -112,10 +124,15 @@ blk::blk(pci::device& pci_dev)
     read_config();
 
     //register the single irq callback for the block
-    sched::thread* t = new sched::thread([this] { this->req_done(); });
+    sched::thread* t = new sched::thread([this] { this->req_done(); },
+            sched::thread::attr().name("virtio-blk"));
     t->start();
     auto queue = get_virt_queue(0);
-    _msi.easy_register({ { 0, [=] { queue->disable_interrupts(); }, t } });
+    if (pci_dev.is_msix()) {
+        _msi.easy_register({ { 0, [=] { queue->disable_interrupts(); }, t } });
+    } else {
+        _gsi.set_ack_and_handler(pci_dev.get_interrupt_line(), [=] { return this->ack_irq(); }, [=] { t->wake(); });
+    }
 
     // Enable indirect descriptor
     queue->set_use_indirect(true);
@@ -142,7 +159,7 @@ blk::~blk()
     // including the thread objects and their stack
 }
 
-bool blk::read_config()
+void blk::read_config()
 {
     //read all of the block config (including size, mce, topology,..) in one shot
     virtio_conf_read(virtio_pci_config_offset(), &_config, sizeof(_config));
@@ -167,8 +184,6 @@ bool blk::read_config()
         set_readonly();
         trace_virtio_blk_read_config_ro();
     }
-
-    return true;
 }
 
 void blk::req_done()
@@ -289,7 +304,7 @@ int blk::make_request(struct bio* bio)
     }
 }
 
-u32 blk::get_driver_features(void)
+u32 blk::get_driver_features()
 {
     auto base = virtio_driver::get_driver_features();
     return (base | ( 1 << VIRTIO_BLK_F_SIZE_MAX)

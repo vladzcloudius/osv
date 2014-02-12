@@ -8,8 +8,8 @@
 #ifndef TST_SYNCH_H
 #define TST_SYNCH_H
 
-#include "sched.hh"
-#include "debug.hh"
+#include <osv/sched.hh>
+#include <osv/debug.hh>
 #include "tst-hub.hh"
 
 extern "C" {

@@ -12,9 +12,11 @@ from glob import glob
 from collections import defaultdict
 from itertools import ifilter
 
+arch = 'x64'
 build_dir = os.path.dirname(gdb.current_objfile().filename)
 osv_dir = os.path.abspath(os.path.join(build_dir, '../..'))
-external = os.path.join(osv_dir, 'external')
+mgmt_dir = os.path.join(osv_dir, 'mgmt')
+external = os.path.join(osv_dir, 'external', arch)
 
 sys.path.append(os.path.join(osv_dir, 'scripts'))
 
@@ -101,7 +103,7 @@ class syminfo(object):
 def translate(path):
     '''given a path, try to find it on the host OS'''
     name = os.path.basename(path)
-    for top in [build_dir, external, '/zfs']:
+    for top in [build_dir, mgmt_dir, external, '/zfs']:
         for root, dirs, files in os.walk(top):
             if name in files:
                 return os.path.join(root, name)
@@ -171,7 +173,7 @@ def vma_list(node = None):
         node = p['header_plus_size_']['header_']['parent_']
 
     if (long(node) != 0):
-        offset = gdb.parse_and_eval('(int)&((mmu::vma*)0)->_vma_list_hook');
+        offset = gdb.parse_and_eval("(int)&(('mmu::vma'*)0)->_vma_list_hook");
         vma = node.cast(gdb.lookup_type('void').pointer()) - offset
         vma = vma.cast(gdb.lookup_type('mmu::vma').pointer())
 
@@ -375,6 +377,21 @@ class osv_zfs(gdb.Command):
             print ("\tL2ARC misses: %d (%.2f%%)" %
                    (l2arc_misses, l2arc_misses_perc))
 
+def bits2str(bits, chars):
+    r = ''
+    if bits == 0:
+        return 'none'.ljust(len(chars))
+    for i in range(len(chars)):
+        if bits & (1 << i):
+            r += chars[i]
+    return r.ljust(len(chars))
+
+def permstr(perm):
+    return bits2str(perm, ['r', 'w', 'x'])
+
+def flagstr(flags):
+    return bits2str(flags, ['f', 'p', 's', 'u', 'j'])
+
 class osv_mmap(gdb.Command):
     def __init__(self):
         gdb.Command.__init__(self, 'osv mmap',
@@ -383,8 +400,10 @@ class osv_mmap(gdb.Command):
         for vma in vma_list():
             start = ulong(vma['_range']['_start'])
             end   = ulong(vma['_range']['_end'])
-            size  = ulong(end - start)
-            print '0x%016x 0x%016x [%s kB]' % (start, end, size / 1024)
+            flags =  flagstr(ulong(vma['_flags']))
+            perm =  permstr(ulong(vma['_perm']))
+            size  = '{:<16}'.format('[%s kB]' % (ulong(end - start)/1024))
+            print '0x%016x 0x%016x %s flags=%s perm=%s' % (start, end, size, flags, perm)
     
 ulong_type = gdb.lookup_type('unsigned long')
 timer_type = gdb.lookup_type('sched::timer_base')
@@ -411,10 +430,13 @@ class osv_syms(gdb.Command):
         while long(p.dereference()):
             obj = p.dereference().dereference()
             base = long(obj['_base'])
-            path = obj['_pathname']['_M_dataplus']['_M_p'].string()
-            path = translate(path)
-            print path, hex(base)
-            load_elf(path, base)
+            obj_path = obj['_pathname']['_M_dataplus']['_M_p'].string()
+            path = translate(obj_path)
+            if not path:
+                print 'ERROR: Unable to locate object file for:', obj_path, hex(base)
+            else:
+                print path, hex(base)
+                load_elf(path, base)
             p += 1
 
 class osv_info(gdb.Command):
@@ -585,7 +607,7 @@ def show_thread_timers(t):
         gdb.write('  timers:')
         for timer in timer_list:
             expired = '*' if timer['_state'] == timer_state_expired else ''
-            expiration = long(timer['_time']) / 1.0e9
+            expiration = long(timer['_time']['__d']['__r']) / 1.0e9
             gdb.write(' %11.9f%s' % (expiration, expired))
         gdb.write('\n')
 
@@ -658,6 +680,7 @@ class osv_info_threads(gdb.Command):
             with thread_context(t, state):
                 cpu = thread_cpu(t)
                 tid = t['_id']
+                name = t['_attr']['_name']['_M_elems'].string()
                 newest_frame = gdb.selected_frame()
                 # Non-running threads have always, by definition, just called
                 # a reschedule, and the stack trace is filled with reschedule
@@ -683,8 +706,8 @@ class osv_info_threads(gdb.Command):
                 else:
                     location = '??'
 
-                gdb.write('%4d (0x%x) cpu%s %-10s %s vruntime %12g\n' %
-                          (tid, ulong(t),
+                gdb.write('%4d (0x%x) %-15s cpu%s %-10s %s vruntime %12g\n' %
+                          (tid, ulong(t), name,
                            cpu['arch']['acpi_id'],
                            thread_status(t),
                            location,
@@ -804,8 +827,10 @@ def all_traces():
 
     inf = gdb.selected_inferior()
     trace_log = gdb.lookup_global_symbol('trace_log').value()
+    if not trace_log:
+    	return
     max_trace = ulong(gdb.parse_and_eval('max_trace'))
-    trace_log = inf.read_memory(trace_log.address, max_trace)
+    trace_log = inf.read_memory(trace_log, max_trace)
     trace_page_size = ulong(gdb.parse_and_eval('trace_page_size'))
     last = ulong(gdb.lookup_global_symbol('trace_record_last').value()['_M_i'])
     last %= max_trace
@@ -819,7 +844,8 @@ def all_traces():
 
     i = 0
     while i < last:
-        tp_key, thread, time, cpu, flags = struct.unpack('QQQII', trace_log[i:i+32])
+        tp_key, thread, thread_name, time, cpu, flags = struct.unpack('QQ16sQII', trace_log[i:i+48])
+        thread_name = thread_name.rstrip('\0')
         if tp_key == 0:
             i = align_up(i + 8, trace_page_size)
             continue
@@ -831,7 +857,7 @@ def all_traces():
                 sig_to_string(ulong(tp_ref['sig'])), str(tp_ref["format"].string()))
             tracepoints[tp_key] = tp
 
-        i += 32
+        i += 48
 
         backtrace = None
         if flags & 1:
@@ -842,7 +868,7 @@ def all_traces():
         data = struct.unpack(tp.signature, trace_log[i:i+size])
         i += size
         i = align_up(i, 8)
-        yield Trace(tp, thread, time, cpu, data, backtrace=backtrace)
+        yield Trace(tp, thread, thread_name, time, cpu, data, backtrace=backtrace)
 
 def save_traces_to_file(filename):
     trace.write_to_file(filename, list(all_traces()))

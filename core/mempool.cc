@@ -5,8 +5,8 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "mempool.hh"
-#include "ilog2.hh"
+#include <osv/mempool.hh>
+#include <osv/ilog2.hh>
 #include "arch-setup.hh"
 #include <cassert>
 #include <cstdint>
@@ -15,18 +15,18 @@
 #include <boost/utility.hpp>
 #include <string.h>
 #include "libc/libc.hh"
-#include "align.hh"
-#include <debug.hh>
-#include "alloctracker.hh"
+#include <osv/align.hh>
+#include <osv/debug.hh>
+#include <osv/alloctracker.hh>
 #include <atomic>
-#include "mmu.hh"
+#include <osv/mmu.hh>
 #include <osv/trace.hh>
 #include <lockfree/ring.hh>
 #include <osv/percpu-worker.hh>
-#include <preempt-lock.hh>
-#include <sched.hh>
+#include <osv/preempt-lock.hh>
+#include <osv/sched.hh>
 #include <algorithm>
-#include "prio.hh"
+#include <osv/prio.hh>
 #include <stdlib.h>
 
 TRACEPOINT(trace_memory_malloc, "buf=%p, len=%d", void *, size_t);
@@ -93,7 +93,7 @@ static unsigned mempool_cpuid() {
 
 const unsigned free_objects_ring_size = 256;
 typedef ring_spsc<void*, free_objects_ring_size> free_objects_type;
-free_objects_type pcpu_free_list[sched::max_cpus][sched::max_cpus];
+free_objects_type ***pcpu_free_list;
 
 struct freelist_full_sync_object {
     mutex _mtx;
@@ -119,9 +119,9 @@ static void free_worker_fn()
     unsigned cpu_id = mempool_cpuid();
 
     // drain the ring, free all objects
-    for (unsigned i=0; i < sched::max_cpus; i++) {
+    for (unsigned i=0; i < sched::cpus.size(); i++) {
         void* obj = nullptr;
-        while (pcpu_free_list[cpu_id][i].pop(obj)) {
+        while (pcpu_free_list[cpu_id][i]->pop(obj)) {
             memory::pool::from_object(obj)->free(obj);
         }
     }
@@ -286,7 +286,7 @@ void pool::free_different_cpu(free_object* obj, unsigned obj_cpu)
     trace_pool_free_different_cpu(this, object, obj_cpu);
     free_objects_type *ring;
 
-    ring = &memory::pcpu_free_list[obj_cpu][mempool_cpuid()];
+    ring = memory::pcpu_free_list[obj_cpu][mempool_cpuid()];
     if (!ring->push(object)) {
         DROP_LOCK(preempt_lock) {
             // The ring is full, take a mutex and use the sync object, hand
@@ -298,7 +298,7 @@ void pool::free_different_cpu(free_object* obj, unsigned obj_cpu)
                 });
 
                 WITH_LOCK(preempt_lock) {
-                    ring = &memory::pcpu_free_list[obj_cpu][mempool_cpuid()];
+                    ring = memory::pcpu_free_list[obj_cpu][mempool_cpuid()];
                     if (!ring->push(object)) {
                         // If the ring is full, use the secondary queue.
                         // sync._free_obj is guaranteed null as we're
@@ -351,7 +351,26 @@ malloc_pool malloc_pools[ilog2_roundup_constexpr(page_size) + 1]
     __attribute__((init_priority((int)init_prio::malloc_pools)));
 
 struct mark_smp_allocator_intialized {
-    mark_smp_allocator_intialized() { smp_allocator = true; }
+    mark_smp_allocator_intialized() {
+        // FIXME: Handle CPU hot-plugging.
+        auto ncpus = sched::cpus.size();
+        // Our malloc() is very coarse, and can use 2 pages for allocating a
+        // free_objects_type which is a little over half a page. So allocate
+        // all the queues in one large buffer.
+        auto buf = aligned_alloc(alignof(free_objects_type),
+                    sizeof(free_objects_type) * ncpus * ncpus);
+        pcpu_free_list = new free_objects_type**[ncpus];
+        for (auto i = 0U; i < ncpus; i++) {
+            pcpu_free_list[i] = new free_objects_type*[ncpus];
+            for (auto j = 0U; j < ncpus; j++) {
+                static_assert(!(sizeof(free_objects_type) %
+                        alignof(free_objects_type)), "free_objects_type align");
+                pcpu_free_list[i][j] = static_cast<free_objects_type *>(
+                        buf + sizeof(free_objects_type) * (i * ncpus + j));
+            }
+        }
+        smp_allocator = true;
+    }
 } s_mark_smp_alllocator_initialized __attribute__((init_priority((int)init_prio::malloc_pools)));
 
 malloc_pool::malloc_pool()
@@ -610,6 +629,7 @@ reclaimer::reclaimer()
     // std::thread is implemented ontop of pthreads, so it is fine
     std::thread tmp([&] {
         _thread = sched::thread::current();
+        _thread->set_name("reclaimer");
         osv_reclaimer_thread = reinterpret_cast<unsigned char *>(_thread);
         allow_emergency_alloc = true;
         do {
@@ -836,8 +856,7 @@ static void* early_alloc_page()
 {
     WITH_LOCK(free_page_ranges_lock) {
         if (free_page_ranges.empty()) {
-            debug("alloc_page(): out of memory\n");
-            abort();
+            abort("alloc_page(): out of memory\n");
         }
 
         auto p = &*free_page_ranges.begin();

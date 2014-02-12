@@ -8,7 +8,7 @@
 #include <sstream>
 #include <iomanip>
 
-#include "debug.hh"
+#include <osv/debug.hh>
 
 #include "drivers/pci.hh"
 #include "drivers/driver.hh"
@@ -80,7 +80,7 @@ void pci_device_print(u8 bus, u8 slot, u8 func)
     }
 }
 
-void pci_devices_print(void)
+void pci_devices_print()
 {
     u16 bus, slot, func;
 
@@ -101,8 +101,9 @@ void pci_devices_print(void)
     }
 }
 
-void check_bus(u16 bus)
+bool check_bus(u16 bus)
 {
+    bool found = false;
     u16 slot, func;
     for (slot = 0; slot < 32; slot++) {
         if (read_pci_config_word(bus, slot, 0, PCI_VENDOR_ID) == 0xffff)
@@ -113,6 +114,8 @@ void check_bus(u16 bus)
             if (read_pci_config(bus, slot, func, PCI_CLASS_REVISION) == 0xffffffff) {
                 continue;
             }
+
+            found = true;
 
             function * dev = nullptr;
             if (function::is_bridge(bus, slot, func)) {
@@ -134,7 +137,7 @@ void check_bus(u16 bus)
                 pci_e("Error: couldn't register device %x:%x.%x",
                         bus, slot, func);
                 //TODO: Need to beautify it as multiple instances of the device may exist
-                delete (dev);
+                delete dev;
             }
 
             // test for multiple functions
@@ -143,24 +146,15 @@ void check_bus(u16 bus)
                 break;
         }
     }
-}
-void pci_device_enumeration(void)
-{
-    u16 func;
 
-    bool single_bus = (read_pci_config_byte(0, 0, 0, PCI_HEADER_TYPE) & PCI_HEADER_MULTI_FUNC) == 0;
-   
-    if (single_bus) {
-        check_bus(0);
-    } else {
-        for (func = 0; func < 8; func++) {
-            if (read_pci_config_word(0, 0, func, PCI_VENDOR_ID) == 0xffff) {
-                if (func == 0)
-                    break; // func 0 not present, skip entire device
-                continue;
-            }
-            check_bus(func);
-        }
+    return found;
+}
+
+void pci_device_enumeration()
+{
+    for (u16 bus = 0; bus < 256; bus++) {
+        if (check_bus(bus))
+            break;
     }
 }
 }

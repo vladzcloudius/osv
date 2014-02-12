@@ -6,8 +6,8 @@
  */
 
 
-#include "sched.hh"
-#include "debug.hh"
+#include <osv/sched.hh>
+#include <osv/debug.hh>
 
 #include <osv/condvar.h>
 #include <sys/mman.h>

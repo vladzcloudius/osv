@@ -12,8 +12,8 @@
 #include <tuple>
 #include <boost/format.hpp>
 #include <osv/types.h>
-#include <align.hh>
-#include <sched.hh>
+#include <osv/align.hh>
+#include <osv/sched.hh>
 #include <boost/intrusive/list.hpp>
 #include <string>
 #include <unordered_set>
@@ -30,6 +30,7 @@ class tracepoint_base;
 struct trace_record {
     tracepoint_base* tp;
     sched::thread* thread;
+    std::array<char, 16> thread_name;
     u64 time;
     unsigned cpu;
     bool backtrace : 1;  // 10-element backtrace precedes parameters
@@ -308,6 +309,7 @@ public:
         auto tr = allocate_trace_record(size());
         tr->tp = this;
         tr->thread = sched::thread::current();
+        tr->thread_name = tr->thread->name_raw();
         tr->time = 0;
         tr->cpu = -1;
         auto buffer = tr->buffer;

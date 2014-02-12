@@ -7,10 +7,10 @@
 
 // test the fpu, especially with preemption enabled
 
-#include "sched.hh"
+#include <osv/sched.hh>
 #include <vector>
 #include <atomic>
-#include "debug.hh"
+#include <osv/debug.hh>
 #include <boost/format.hpp>
 #include <cmath>
 

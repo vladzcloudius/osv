@@ -8,8 +8,8 @@
 #ifndef ARCH_MMU_HH_
 #define ARCH_MMU_HH_
 
-#include "ilog2.hh"
-#include "mmu.hh"
+#include <osv/ilog2.hh>
+#include <osv/mmu.hh>
 
 namespace mmu {
 

@@ -5,8 +5,8 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "sched.hh"
-#include "debug.hh"
+#include <osv/sched.hh>
+#include <osv/debug.hh>
 
 int main(int argc, char **argv)
 {

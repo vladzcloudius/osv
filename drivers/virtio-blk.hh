@@ -121,10 +121,10 @@ public:
     explicit blk(pci::device& dev);
     virtual ~blk();
 
-    virtual const std::string get_name(void) { return _driver_name; }
-    bool read_config();
+    virtual const std::string get_name() { return _driver_name; }
+    void read_config();
 
-    virtual u32 get_driver_features(void);
+    virtual u32 get_driver_features();
 
     int make_request(struct bio*);
 
@@ -133,6 +133,8 @@ public:
 
     void set_readonly() {_ro = true;}
     bool is_readonly() {return _ro;}
+
+    bool ack_irq();
 
     static hw_driver* probe(hw_device* dev);
 private:
@@ -155,6 +157,7 @@ private:
     bool _ro;
     // This mutex protects parallel make_request invocations
     mutex _lock;
+    gsi_level_interrupt _gsi;
 };
 
 }

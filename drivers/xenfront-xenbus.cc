@@ -5,14 +5,13 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "clock.hh"
 #include "msr.hh"
 #include <osv/types.h>
-#include "mmu.hh"
+#include <osv/mmu.hh>
 #include "string.h"
 #include "cpuid.hh"
-#include "barrier.hh"
-#include "debug.hh"
+#include <osv/barrier.hh>
+#include <osv/debug.hh>
 #include "xen.hh"
 #include "processor.hh"
 #include "xenfront.hh"
@@ -84,7 +83,8 @@ void xenbus::wait_for_devices()
 {
     WITH_LOCK(_children_mutex) {
         while (!_pending_children.empty() || _children.empty()) {
-            condvar_wait(&_pending_devices, &_children_mutex, nanotime() + 1000_ms);
+            using namespace osv::clock::literals;
+            _pending_devices.wait(&_children_mutex, 1000_ms);
         }
         for (auto device : _pending_children) {
             debug("Device %s bringup failed\n", device->get_name());
@@ -139,7 +139,7 @@ void xenbus::dump_config()
     _dev.dump_config();
 }
 
-bool xenbus::parse_pci_config(void)
+bool xenbus::parse_pci_config()
 {
     return _dev.parse_pci_config();
 }

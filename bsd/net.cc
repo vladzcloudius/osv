@@ -5,9 +5,9 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "debug.hh"
+#include <osv/debug.hh>
 #include <sys/time.h>
-#include <mempool.hh>
+#include <osv/mempool.hh>
 
 #include <bsd/porting/callout.h>
 #include <bsd/porting/netport.h>

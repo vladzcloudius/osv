@@ -1,5 +1,5 @@
-#include "sched.hh"
-#include "debug.hh"
+#include <osv/sched.hh>
+#include <osv/debug.hh>
 
 #include <bsd/porting/netport.h>
 #include <bsd/porting/sync_stub.h>
@@ -37,7 +37,7 @@ netisr_osv_cookie_t netisr_osv_start_thread(netisr_osv_handler_t handler, void* 
 {
     sched::thread* t = new sched::thread([=] {
         netisr_osv_thread_wrapper(handler, arg);
-    });
+    }, sched::thread::attr().name("netisr"));
     t->start();
 
     return (niosv_to_cookie(t));

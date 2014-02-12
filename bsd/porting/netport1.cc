@@ -6,9 +6,8 @@
  */
 
 #include <osv/types.h>
-#include "drivers/clock.hh"
-#include "sched.hh"
-#include "mempool.hh"
+#include <osv/sched.hh>
+#include <osv/mempool.hh>
 #include "bsd/sys/cddl/compat/opensolaris/sys/kcondvar.h"
 #include "bsd/cddl/compat/opensolaris/include/mnttab.h"
 #include <osv/mount.h>
@@ -25,7 +24,7 @@ int osv_curtid(void)
     return (sched::thread::current()->id());
 }
 
-void ntm2tv(u64 ntm, struct timeval *tvp)
+static void ntm2tv(u64 ntm, struct timeval *tvp)
 {
     u64 utm = ntm / 1000L;
 
@@ -35,20 +34,22 @@ void ntm2tv(u64 ntm, struct timeval *tvp)
 
 void getmicrotime(struct timeval *tvp)
 {
-    u64 ntm = clock::get()->time();
+    u64 ntm = std::chrono::duration_cast<std::chrono::nanoseconds>
+                (osv::clock::wall::now().time_since_epoch()).count();
     ntm2tv(ntm, tvp);
 }
 
 void getmicrouptime(struct timeval *tvp)
 {
-    /* FIXME: OSv - initialize time_uptime */
-    u64 ntm = clock::get()->time() - time_uptime;
+    u64 ntm = std::chrono::duration_cast<std::chrono::nanoseconds>
+                (osv::clock::uptime::now().time_since_epoch()).count();
     ntm2tv(ntm, tvp);
 }
 
 int get_ticks(void)
 {
-    u64 ntm = clock::get()->time();
+    u64 ntm = std::chrono::duration_cast<std::chrono::nanoseconds>
+                (osv::clock::uptime::now().time_since_epoch()).count();
     return (ns2ticks(ntm));
 }
 
@@ -62,7 +63,7 @@ int cv_timedwait(kcondvar_t *cv, mutex_t *mutex, clock_t tmo)
     if (tmo <= 0) {
         return -1;
     }
-    auto ret = condvar_wait(cv, mutex, clock::get()->time() + ticks2ns(tmo));
+    auto ret = cv->wait(mutex, std::chrono::nanoseconds(ticks2ns(tmo)));
     return ret == ETIMEDOUT ? -1 : 0;
 }
 

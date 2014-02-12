@@ -5,9 +5,9 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "interrupt.hh"
+#include <osv/interrupt.hh>
 #include "exceptions.hh"
-#include "mmu.hh"
+#include <osv/mmu.hh>
 #include <osv/mutex.h>
 
 namespace ioapic {
@@ -80,17 +80,25 @@ gsi_edge_interrupt::~gsi_edge_interrupt()
 }
 
 gsi_level_interrupt::gsi_level_interrupt(unsigned gsi,
-                                         std::function<void ()> ack,
+                                         std::function<bool ()> ack,
                                          std::function<void ()> handler)
-    : _vector(idt.register_level_triggered_handler(ack, handler))
+    : _vector(idt.register_level_triggered_handler(gsi, ack, handler))
 {
-    //TODO: Interrupt sharing support
-    _gsi.set(gsi, _vector);
+    _gsi.set(gsi, _vector.get().vector);
+}
+
+void gsi_level_interrupt::set_ack_and_handler(unsigned gsi,
+        std::function<bool ()> ack,
+        std::function<void ()> handler)
+{
+    _vector = idt.register_level_triggered_handler(gsi, ack, handler);
+    _gsi.set(gsi, _vector.get().vector);
 }
 
 gsi_level_interrupt::~gsi_level_interrupt()
 {
     _gsi.clear();
-    idt.unregister_handler(_vector);
+    if (_vector)
+        idt.unregister_level_triggered_handler(_vector.get());
 }
 

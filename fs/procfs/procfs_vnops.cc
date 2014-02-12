@@ -9,8 +9,8 @@
 #include <osv/vnode.h>
 #include <osv/mount.h>
 #include <osv/prex.h>
-#include "sched.hh"
-#include "mmu.hh"
+#include <osv/sched.hh>
+#include <osv/mmu.hh>
 
 #include <functional>
 #include <memory>

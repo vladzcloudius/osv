@@ -19,15 +19,9 @@ mgmt = 1
 # idea whether the target has changed or not.  So we call ant from here,
 # and then the main makefile can treat the build products (jars) as inputs
 
-X86_64=$(shell echo __x86_64__ | $(CC) -E -xc - | tail -n 1)
-ifneq ($(X86_64),1)
-$(error OSv can only be built on a 64-bit x86 Linux distribution.)
-endif
-
 all: $(submake) $(modulemk)
 	$(call quiet, $(silentant) ant -Dmode=$(mode) -Dout=$(abspath $(out)/tests/bench) \
 		-e -f tests/bench/build.xml $(if $V,,-q), ANT tests/bench)
-	$(call only-if, $(mgmt), cd mgmt && ./gradlew --daemon :web:jar build)
 	$(MAKE) -r -C $(dir $(submake)) $@
 
 $(submake) $(modulemk): Makefile
@@ -40,7 +34,10 @@ $(submake) $(modulemk): Makefile
 
 clean:
 	$(call quiet, rm -rf build/$(mode), CLEAN)
-	$(call only-if, $(mgmt), $(call quiet, cd mgmt && ./gradlew --daemon clean >> /dev/null, GRADLE CLEAN))
+	$(call only-if, $(mgmt), $(call quiet, $(MAKE) -C mgmt clean >> /dev/null, MGMT CLEAN))
+	$(call quiet, cd java && mvn clean -q, MVN CLEAN)
+
+check: export image ?= tests
 
 check: all
 	./scripts/test.py

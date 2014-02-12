@@ -5,21 +5,19 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "sched.hh"
+#include <osv/sched.hh>
 #include <list>
 #include <osv/mutex.h>
 #include <mutex>
-#include "debug.hh"
-#include "drivers/clockevent.hh"
-#include "irqlock.hh"
-#include "align.hh"
-#include "drivers/clock.hh"
-#include "interrupt.hh"
+#include <osv/debug.hh>
+#include <osv/irqlock.hh>
+#include <osv/align.hh>
+#include <osv/interrupt.hh>
 #include "smp.hh"
 #include "osv/trace.hh"
 #include <osv/percpu.hh>
-#include "prio.hh"
-#include "elf.hh"
+#include <osv/prio.hh>
+#include <osv/elf.hh>
 #include <stdlib.h>
 #include <unordered_map>
 
@@ -28,6 +26,7 @@ __thread char* percpu_base;
 extern char _percpu_start[], _percpu_end[];
 
 using namespace osv;
+using namespace osv::clock::literals;
 
 void cancel_this_thread_alarm();
 
@@ -62,7 +61,7 @@ inter_processor_interrupt wakeup_ipi{[] {}};
 // In particular, it can be seen that if a thread has been monopolizing the
 // CPU, and a long-sleeping thread wakes up (or new thread is created),
 // the new thread will get to run for ln2*tau. (ln2 is roughly 0.7).
-constexpr s64 tau = 200_ms;
+constexpr thread_runtime::duration tau = 200_ms;
 
 // "thyst" controls the hysteresis algorithm which temporarily gives a
 // running thread some extra runtime before preempting it. We subtract thyst
@@ -70,23 +69,23 @@ constexpr s64 tau = 200_ms;
 // out. In particular, it can be shown that when two cpu-busy threads at equal
 // priority compete, they will alternate at time-slices of 2*thyst; Also,
 // the distance between two preemption interrupts cannot be lower than thyst.
-constexpr s64 thyst = 2_ms;
+constexpr thread_runtime::duration thyst = 2_ms;
 
-constexpr s64 context_switch_penalty = 10_us;
+constexpr thread_runtime::duration context_switch_penalty = 10_us;
 
 constexpr float cmax = 0x1P63;
 constexpr float cinitial = 0x1P-63;
 
-static inline float exp_tau(s64 t) {
+static inline float exp_tau(thread_runtime::duration t) {
     // return expf((float)t/(float)tau);
     // Approximate e^x as much faster 1+x for x<0.001 (the error is O(x^2)).
     // Further speed up by comparing and adding integers as much as we can:
-    static constexpr int m = tau / 1000;
-    static constexpr float invtau = 1.0f / tau;
-    if (t < m && t > -m)
-        return (tau + t) * invtau;
+    static constexpr int m = tau.count() / 1000;
+    static constexpr float invtau = 1.0f / tau.count();
+    if (t.count() < m && t.count() > -m)
+        return (tau.count() + t.count()) * invtau;
     else
-        return expf(t * invtau);
+        return expf(t.count() * invtau);
 }
 
 // fastlog2() is an approximation of log2, designed for speed over accuracy
@@ -110,7 +109,7 @@ static inline float taulog(float f) {
     // where it's fine to overshoot, even significantly, the correct time
     // because a thread running a bit too much will "pay" in runtime.
     // We multiply by 1.01 to ensure overshoot, not undershoot.
-    static constexpr float tau2 = tau * 0.69314718f * 1.01;
+    static constexpr float tau2 = tau.count() * 0.69314718f * 1.01;
     return tau2 * fastlog2(f);
 }
 
@@ -158,8 +157,9 @@ cpu::cpu(unsigned _id)
 
 void cpu::init_idle_thread()
 {
-    running_since = clock::get()->time();
-    idle_thread = new thread([this] { idle(); }, thread::attr().pin(this));
+    running_since = osv::clock::uptime::now();
+    std::string name = osv::sprintf("idle%d", id);
+    idle_thread = new thread([this] { idle(); }, thread::attr().pin(this).name(name));
     idle_thread->set_priority(thread::priority_idle);
 }
 
@@ -196,8 +196,8 @@ void cpu::reschedule_from_interrupt(bool preempt)
 
     need_reschedule = false;
     handle_incoming_wakeups();
-    auto now = clock::get()->time();
 
+    auto now = osv::clock::uptime::now();
     auto interval = now - running_since;
     running_since = now;
     if (interval <= 0) {
@@ -415,7 +415,7 @@ void cpu::load_balance()
     notifier::fire();
     timer tmr(*thread::current());
     while (true) {
-        tmr.set(clock::get()->time() + 100_ms);
+        tmr.set(osv::clock::uptime::now() + 100_ms);
         thread::wait_until([&] { return tmr.expired(); });
         if (runqueue.empty()) {
             continue;
@@ -704,12 +704,19 @@ void thread::destroy()
 }
 
 // Must be called under rcu_read_lock
-void thread::wake_impl(detached_state* st)
+//
+// allowed_initial_states_mask *must* contain status::waiting, and
+// *may* contain status::sending_lock (for waitqueue wait morphing).
+// it will transition from one of the allowed initial states to the
+// waking state.
+void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
 {
     status old_status = status::waiting;
     trace_sched_wake(st->t);
-    if (!st->st.compare_exchange_strong(old_status, status::waking)) {
-        return;
+    while (!st->st.compare_exchange_weak(old_status, status::waking)) {
+        if (!((1 << unsigned(old_status)) & allowed_initial_states_mask)) {
+            return;
+        }
     }
     auto tcpu = st->_cpu;
     WITH_LOCK(preempt_lock_in_rcu) {
@@ -736,6 +743,29 @@ void thread::wake()
     }
 }
 
+void thread::wake_lock(mutex* mtx, wait_record* wr)
+{
+    // must be called with mtx held
+    WITH_LOCK(rcu_read_lock) {
+        auto st = _detached_state.get();
+        // We want to send_lock() to this thread, but we want to be sure we're the only
+        // ones doing it, and that it doesn't wake up while we do
+        auto expected = status::waiting;
+        if (!st->st.compare_exchange_strong(expected, status::sending_lock, std::memory_order_relaxed)) {
+            // let the thread acquire the lock itself
+            return;
+        }
+        // Send the lock to the thread, unless someone else already woke the us up,
+        // and we're sleeping in mutex::lock().
+        if (mtx->send_lock_unless_already_waiting(wr)) {
+            st->lock_sent = true;
+        } else {
+            st->st.store(status::waiting, std::memory_order_relaxed);
+        }
+        // since we're in status::sending_lock, no one can wake us except mutex::unlock
+    }
+}
+
 void thread::main()
 {
     _func();
@@ -753,13 +783,6 @@ void thread::wait()
     trace_sched_wait_ret();
 }
 
-void thread::sleep_until(s64 abstime)
-{
-    timer t(*current());
-    t.set(abstime);
-    wait_until([&] { return t.expired(); });
-}
-
 void thread::stop_wait()
 {
     // Can only re-enable preemption of this thread after it is no longer
@@ -772,7 +795,7 @@ void thread::stop_wait()
         return;
     }
     preempt_enable();
-    while (st.load() == status::waking) {
+    while (st.load() == status::waking || st.load() == status::sending_lock) {
         schedule();
     }
     assert(st.load() == status::running);
@@ -883,6 +906,16 @@ unsigned long thread::id()
     return _id;
 }
 
+void thread::set_name(std::string name)
+{
+    _attr.name(name);
+}
+
+std::string thread::name() const
+{
+    return _attr._name.data();
+}
+
 void* thread::get_tls(ulong module)
 {
     if (module == elf::program::core_module_index) {
@@ -956,11 +989,12 @@ timer_list::callback_dispatch::callback_dispatch()
 
 void timer_list::fired()
 {
-    auto now = clock::get()->time();
-    _last = std::numeric_limits<s64>::max();
+    auto now = osv::clock::uptime::now();
+    _last = osv::clock::uptime::time_point::max();
     // don't hold iterators across list iteration, since the list can change
     while (!_list.empty() && _list.begin()->_time <= now) {
         auto j = _list.begin();
+        assert(j->_state == timer_base::state::armed);
         _list.erase(j);
         j->expire();
     }
@@ -1026,9 +1060,9 @@ void timer_base::expire()
     _t.timer_fired();
 }
 
-void timer_base::set(s64 time)
+void timer_base::set(osv::clock::uptime::time_point time)
 {
-    trace_timer_set(this, time);
+    trace_timer_set(this, time.time_since_epoch().count());
     _state = state::armed;
     _time = time;
     irq_save_lock_type irq_lock;
@@ -1135,6 +1169,7 @@ void init(std::function<void ()> cont)
 {
     thread::attr attr;
     attr.stack(4096*10).pin(smp_initial_find_current_cpu());
+    attr.name("init");
     thread t{cont, attr, true};
     t.switch_to_first();
 }
@@ -1176,7 +1211,7 @@ void thread_runtime::update_after_sleep()
     _renormalize_count = cpu_renormalize_count;
 }
 
-void thread_runtime::ran_for(s64 time)
+void thread_runtime::ran_for(thread_runtime::duration time)
 {
     assert (_priority > 0);
     assert (time >= 0);
@@ -1274,19 +1309,20 @@ void thread_runtime::add_context_switch_penalty()
 
 }
 
-s64 thread_runtime::time_until(runtime_t target_local_runtime) const
+thread_runtime::duration
+thread_runtime::time_until(runtime_t target_local_runtime) const
 {
     if (_priority == inf) {
-        return -1;
+        return thread_runtime::duration(-1);
     }
     if (target_local_runtime == inf) {
-        return -1;
+        return thread_runtime::duration(-1);
     }
     auto ret = taulog(runtime_t(1) +
             (target_local_runtime - _Rtt) / _priority / cpu::current()->c);
-    if (ret > (runtime_t)std::numeric_limits<s64>::max())
-        return -1;
-    return (s64) ret;
+    if (ret > thread_runtime::duration::max().count())
+        return thread_runtime::duration(-1);
+    return thread_runtime::duration((thread_runtime::duration::rep) ret);
 }
 
 }

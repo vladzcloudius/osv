@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 Cloudius Systems, Ltd.
+ * Copyright (C) 2013-2014 Cloudius Systems, Ltd.
  *
  * This work is open source software, licensed under the terms of the
  * BSD license as described in the LICENSE file in the top-level directory.
@@ -8,17 +8,20 @@
 #include <sys/epoll.h>
 #include <sys/poll.h>
 #include <unistd.h>
-#include "sched.hh"
-#include "debug.hh"
-#include "drivers/clock.hh"
+#include <errno.h>
 
-int tests = 0, fails = 0;
+#include <string>
+#include <iostream>
+#include <chrono>
+#include <thread>
 
-static void report(bool ok, const char* msg)
+static int tests = 0, fails = 0;
+
+static void report(bool ok, std::string msg)
 {
     ++tests;
     fails += !ok;
-    debug("%s: %s\n", (ok ? "PASS" : "FAIL"), msg);
+    std::cout << (ok ? "PASS" : "FAIL") << ": " << msg << "\n";
 }
 
 int main(int ac, char** av)
@@ -30,7 +33,7 @@ int main(int ac, char** av)
     int r = pipe(s);
     report(r == 0, "create pipe");
 
-#define MAXEVENTS 1024
+    constexpr int MAXEVENTS = 1024;
     struct epoll_event events[MAXEVENTS];
 
     r = epoll_wait(ep, events, MAXEVENTS, 0);
@@ -64,7 +67,7 @@ int main(int ac, char** av)
 
     r = epoll_wait(ep, events, MAXEVENTS, 0);
     report(r == 1 && (events[0].events & EPOLLIN) &&
-            (events[0].data.u32 == 123), "epoll_wait again");
+            (events[0].data.u32 == 123), "epoll_wait finds again (because not EPOLLET)");
 
     r = read(s[0], &c, 1);
     report(r == 1, "read after poll");
@@ -73,7 +76,7 @@ int main(int ac, char** av)
     report(r == 0, "epoll after read");
 
 
-    sched::thread t1([&] {
+    std::thread t1([&] {
         int r2 = epoll_wait(ep, events, MAXEVENTS, 5000);
         report(r2 == 1 && (events[0].events & EPOLLIN) &&
                 (events[0].data.u32 == 123), "epoll_wait in thread");
@@ -84,19 +87,64 @@ int main(int ac, char** av)
         r = epoll_wait(ep, events, MAXEVENTS, 0);
         report(r == 0, "epoll after read");
     });
-    t1.start();
-    usleep(500000);
+    std::this_thread::sleep_for(std::chrono::microseconds(500000));
     r = write(s[1], &c, 1);
     report(r == 1, "write single character");
     t1.join();
 
-    auto ts = clock::get()->time();
+    auto ts = std::chrono::high_resolution_clock::now();
     r = epoll_wait(ep, events, MAXEVENTS, 300);
-    auto te = clock::get()->time();
-    report(r == 0 && ((te - ts) > 200_ms), "epoll timeout");
+    auto te = std::chrono::high_resolution_clock::now();
+    report(r == 0 && ((te - ts) > std::chrono::milliseconds(200)),
+            "epoll timeout");
+
+    ////////////////////////////////////////////////////////////////////////////
+    // Test EPOLLET (edge-triggered event notification)
+    // Also test EPOLL_CTL_MOD at the same time.
+    event.events = EPOLLIN | EPOLLET;
+    event.data.u32 = 456;
+    r = epoll_ctl(ep, EPOLL_CTL_MOD, s[0], &event);
+    report(r == 0, "epoll_ctl_mod");
+    r = epoll_wait(ep, events, MAXEVENTS, 0);
+    report(r == 0, "epoll nothing happened yet");
+    r = write(s[1], &c, 1);
+    report(r == 1, "write single character");
+    r = epoll_wait(ep, events, MAXEVENTS, 0);
+    report(r == 1 && (events[0].events & EPOLLIN) &&
+            (events[0].data.u32 == 456), "epoll_wait finds fd");
+    r = epoll_wait(ep, events, MAXEVENTS, 0);
+    report(r == 0, "epoll_wait doesn't find again (because of EPOLLET)");
+    // Also verify that epoll_wait with a timeout doesn't return immediately,
+    // (despite fp->poll() being true right after poll_install()).
+    ts = std::chrono::high_resolution_clock::now();
+    r = epoll_wait(ep, events, MAXEVENTS, 300);
+    te = std::chrono::high_resolution_clock::now();
+    report(r == 0 && ((te - ts) > std::chrono::milliseconds(200)),
+            "epoll timeout doesn't return immediately (EPOLLET)");
+    // The accurate edge-triggered behavior of EPOLLET means that until the
+    // all the data is read from the pipe, epoll should not find the pipe again
+    // even if new data comes in. However, both Linux and OSv gives a "false
+    // positive" where if new data arrives, epoll will return even if the data
+    // was not fully read previously.
+    r = write(s[1], &c, 1);
+    report(r == 1, "write single character");
+    r = epoll_wait(ep, events, MAXEVENTS, 0);
+    report(r == 1 && (events[0].events & EPOLLIN) &&
+            (events[0].data.u32 == 456), "epoll_wait false positive (fine)");
+    r = read(s[0], &c, 1);
+    report(r == 1, "read one byte out of 2 on the pipe");
+    // We only read one byte out of the 2 on the pipe, so there's still data
+    // on the pipe (and poll() verifies this), but with EPOLLET, epoll won't
+    // return it.
+    r = epoll_wait(ep, events, MAXEVENTS, 0);
+    report(r == 0, "now epoll_wait doesn't find this fd (EPOLLET)");
+    r = poll(&p, 1, 0);
+    report(r == 1 && (p.revents & POLLIN), "but poll() does find this fd");
+    r = read(s[0], &c, 1);
+    report(r == 1, "read the last byte on the pipe");
 
 
-    debug("SUMMARY: %d tests, %d failures\n", tests, fails);
+    std::cout << "SUMMARY: " << tests << ", " << fails << " failures\n";
 }
 
 

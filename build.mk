@@ -1,20 +1,51 @@
+ifndef CROSS_PREFIX
+    HOST_CXX=$(CXX)
+else
+    HOST_CXX=g++
+    CXX=$(CROSS_PREFIX)g++
+    CC=$(CROSS_PREFIX)gcc
+    LD=$(CROSS_PREFIX)ld
+endif
 
-arch = x64
-BSD_MACHINE_ARCH = amd64
+detect_arch=$(shell echo $(1) | $(CC) -E -xc - | tail -n 1)
+
+ifndef ARCH
+    ifeq ($(call detect_arch, __x86_64__),1)
+        arch = x64
+    endif
+    ifeq ($(call detect_arch, __aarch64__),1)
+        arch = aarch64
+    endif
+else
+    arch = $(ARCH)
+endif
+$(info build.mk:)
+$(info build.mk: building arch=$(arch), override with ARCH env)
+$(info build.mk:)
+
 image ?= default
 img_format ?= qcow2
 fs_size_mb ?= 10240
 local-includes =
 INCLUDES = $(local-includes) -I$(src)/arch/$(arch) -I$(src) -I$(src)/include
 INCLUDES += -isystem $(src)/include/glibc-compat
-gcc-inc-base = $(src)/external/gcc.bin/usr/include/c++/4.8.2
-gcc-inc-base2 = $(src)/external/gcc.bin/usr/lib/gcc/x86_64-redhat-linux/4.8.2/include
+
+glibcbase = $(src)/external/$(arch)/glibc.bin
+gccbase = $(src)/external/$(arch)/gcc.bin
+miscbase = $(src)/external/$(arch)/misc.bin
+jdkbase := $(shell find $(src)/external/$(arch)/openjdk.bin/usr/lib/jvm \
+                         -maxdepth 1 -type d -name 'java*')
+
+gcc-inc-base := $(dir $(shell find $(gccbase)/ -name vector | grep -v -e debug -e profile))
+gcc-inc-base2 := $(dir $(shell find $(gccbase)/ -name unwind.h))
+gcc-inc-base3 := $(dir $(shell dirname `find $(gccbase)/ -name c++config.h | grep -v /32/`))
+
 INCLUDES += -isystem $(gcc-inc-base)
-INCLUDES += -isystem $(gcc-inc-base)/x86_64-redhat-linux
-INCLUDES += -isystem $(src)/external/acpica/source/include
-INCLUDES += -isystem $(src)/external/misc.bin/usr/include
+INCLUDES += -isystem $(gcc-inc-base3)
+INCLUDES += -isystem $(src)/external/$(arch)/acpica/source/include
+INCLUDES += -isystem $(src)/external/$(arch)/misc.bin/usr/include
 INCLUDES += -isystem $(src)/include/api
-INCLUDES += -isystem $(src)/include/api/x86_64
+INCLUDES += -isystem $(src)/include/api/$(arch)
 # must be after include/api, since it includes some libc-style headers:
 INCLUDES += -isystem $(gcc-inc-base2)
 INCLUDES += -isystem gen/include
@@ -90,8 +121,9 @@ ifeq ($(conf-DEBUG_BUILD),0)
 configuration += -DNDEBUG
 endif
 
+ifeq ($(arch),x64)
 arch-cflags = -msse4.1
-
+endif
 
 quiet = $(if $V, $1, @echo " $2"; $1)
 very-quiet = $(if $V, $1, @$1)
@@ -107,7 +139,7 @@ build-so = $(CC) $(CFLAGS) -o $@ $^
 q-build-so = $(call quiet, $(build-so), CC $@)
 adjust-deps = sed -i 's! $(subst .,\.,$<)\b! !g' $(@:.o=.d)
 q-adjust-deps = $(call very-quiet, $(adjust-deps))
-	
+
 %.o: %.cc
 	$(makedir)
 	$(q-build-cxx)
@@ -147,9 +179,12 @@ boost-tests := tests/tst-rename.so \
 	tests/tst-libc-locking.so \
 	tests/misc-fs-stress.so \
 	tests/misc-bdev-write.so \
+	tests/misc-bdev-wlatency.so \
 	tests/tst-promise.so \
 	tests/tst-dlfcn.so \
 	tests/tst-stat.so
+boost-tests += tests/tst-wait-for.so
+boost-tests += tests/tst-bsd-tcp1.so
 
 java_tests := tests/hello/Hello.class
 
@@ -169,7 +204,6 @@ tests += tests/tst-mmap.so
 tests += tests/tst-huge.so
 tests += tests/misc-mutex.so
 tests += tests/misc-sockets.so
-tests += tests/tst-bsd-tcp1.so
 tests += tests/tst-condvar.so
 tests += tests/tst-queue-mpsc.so
 tests += tests/tst-af-local.so
@@ -206,13 +240,16 @@ tests += tests/tst-nway-merger.so
 tests += tests/tst-memmove.so
 tests += tests/tst-pthread-clock.so
 tests += tests/misc-procfs.so
+tests += tests/tst-chdir.so
+tests += tests/tst-hello.so
 
 tests/hello/Hello.class: javabase=tests/hello
 
-java/runjava.jar:
-	$(call quiet, $(silentant) ant -Dmode=$(mode) -Dout=$(out) \
-		-e -f $(src)/java/runjava/build.xml jar $(if $V,,-q), ANT runjava)
-.PHONY: java/runjava.jar
+java-targets = java-jars java/java.so
+
+java-jars:
+	$(call quiet, cd $(src)/java && mvn package -q -DskipTests=true, MVN $@)
+.PHONY: java-jars
 
 tools/%.o: COMMON += -fPIC
 tools := tools/ifconfig/ifconfig.so
@@ -281,6 +318,7 @@ bsd += bsd/porting/route.o
 bsd += bsd/porting/networking.o
 bsd += bsd/porting/netport.o
 bsd += bsd/porting/netport1.o
+bsd += bsd/porting/shrinker.o
 bsd += bsd/porting/cpu.o
 bsd += bsd/porting/uma_stub.o
 bsd += bsd/porting/sync_stub.o
@@ -355,7 +393,7 @@ bsd/sys/%.o: COMMON += -Wno-sign-compare -Wno-narrowing -Wno-write-strings -Wno-
 
 solaris :=
 solaris += bsd/sys/cddl/compat/opensolaris/kern/opensolaris.o
-solaris += bsd/sys/cddl/contrib/opensolaris/common/atomic/${BSD_MACHINE_ARCH}/opensolaris_atomic.o
+solaris += bsd/sys/cddl/compat/opensolaris/kern/opensolaris_atomic.o
 solaris += bsd/sys/cddl/compat/opensolaris/kern/opensolaris_cmn_err.o
 solaris += bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kmem.o
 solaris += bsd/sys/cddl/compat/opensolaris/kern/opensolaris_kobj.o
@@ -481,6 +519,8 @@ zfs += bsd/sys/cddl/contrib/opensolaris/uts/common/fs/zfs/zrlock.o
 zfs += bsd/sys/cddl/contrib/opensolaris/uts/common/fs/zfs/zvol.o
 
 zfs-tests += tests/misc-zfs-disk.so
+zfs-tests += tests/misc-zfs-io.so
+zfs-tests += tests/misc-zfs-arc.so
 
 tests += tests/tst-zfs-mount.so
 
@@ -508,11 +548,17 @@ $(solaris): ASFLAGS+= \
 
 tests += $(solaris-tests)
 
+libtsm :=
+libtsm += drivers/libtsm/tsm_render.o
+libtsm += drivers/libtsm/tsm_screen.o
+libtsm += drivers/libtsm/tsm_vte.o
+libtsm += drivers/libtsm/tsm_vte_charsets.o
+
 drivers :=
-drivers += drivers/console.o drivers/vga.o drivers/isa-serial.o
+drivers += drivers/console.o drivers/vga.o drivers/kbd.o drivers/isa-serial.o
 drivers += drivers/debug-console.o
 drivers += drivers/ramdisk.o
-drivers += $(bsd) $(solaris)
+drivers += $(bsd) $(solaris) $(libtsm)
 drivers += core/mmu.o
 drivers += core/elf.o
 drivers += core/interrupt.o
@@ -533,6 +579,8 @@ drivers += drivers/hpet.o
 drivers += drivers/xenfront.o drivers/xenfront-xenbus.o drivers/xenfront-blk.o
 drivers += drivers/pvpanic.o
 drivers += drivers/random.o
+drivers += drivers/ahci.o
+drivers += drivers/ide.o
 drivers += java/jvm_balloon.o
 
 objects = bootfs.o
@@ -584,6 +632,9 @@ objects += core/dhcp.o
 objects += core/run.o
 objects += core/shutdown.o
 objects += core/version.o
+objects += core/waitqueue.o
+objects += core/chart.o
+objects += core/net_channel.o
 
 include $(src)/fs/build.mk
 include $(src)/libc/build.mk
@@ -594,15 +645,15 @@ objects += $(acpi)
 
 acpi-defines = -DACPI_MACHINE_WIDTH=64 -DACPI_USE_LOCAL_CACHE
 
-acpi-source := $(shell find $(src)/external/acpica/source/components -type f -name '*.c')
+acpi-source := $(shell find $(src)/external/$(arch)/acpica/source/components -type f -name '*.c')
 acpi = $(patsubst $(src)/%.c, %.o, $(acpi-source))
 
 $(acpi): CFLAGS += -fno-strict-aliasing -Wno-strict-aliasing
 
-libstdc++.a = $(shell find $(gccbase) -name libstdc++.a)
-libsupc++.a = $(shell find $(gccbase) -name libsupc++.a)
-libgcc_s.a = $(shell find $(gccbase) -name libgcc.a |  grep -v /32/)
-libgcc_eh.a = $(shell find $(gccbase) -name libgcc_eh.a |  grep -v /32/)
+libstdc++.a = $(shell find $(gccbase)/ -name libstdc++.a)
+libsupc++.a = $(shell find $(gccbase)/ -name libsupc++.a)
+libgcc_s.a = $(shell find $(gccbase)/ -name libgcc.a |  grep -v /32/)
+libgcc_eh.a = $(shell find $(gccbase)/ -name libgcc_eh.a |  grep -v /32/)
 
 loader.elf: arch/x64/boot.o arch/x64/loader.ld loader.o runtime.o $(drivers) \
         $(objects) dummy-shlib.so \
@@ -619,19 +670,15 @@ loader.elf: arch/x64/boot.o arch/x64/loader.ld loader.o runtime.o $(drivers) \
 dummy-shlib.so: dummy-shlib.o
 	$(call quiet, $(CXX) -nodefaultlibs -shared -o $@ $^, LD $@)
 
-jdkbase := $(shell find $(src)/external/openjdk.bin/usr/lib/jvm \
-                         -maxdepth 1 -type d -name 'java*')
-glibcbase = $(src)/external/glibc.bin
-gccbase = $(src)/external/gcc.bin
-miscbase = $(src)/external/misc.bin
-boost-lib-dir = $(miscbase)/usr/lib64
+boost-lib-dir := $(shell dirname `find $(miscbase)/ -name libboost_system-mt.a`)
+
 boost-libs := $(boost-lib-dir)/libboost_program_options-mt.a \
               $(boost-lib-dir)/libboost_system-mt.a
 
 $(boost-tests): $(boost-lib-dir)/libboost_unit_test_framework-mt.so \
                 $(boost-lib-dir)/libboost_filesystem-mt.so
 
-bsd/%.o: COMMON += -DSMP -D'__FBSDID(__str__)=extern int __bogus__' -D__x86_64__
+bsd/%.o: COMMON += -DSMP -D'__FBSDID(__str__)=extern int __bogus__'
 
 jni = java/jni/balloon.so java/jni/elf-loader.so java/jni/networking.so \
 	java/jni/stty.so java/jni/tracepoint.so java/jni/power.so java/jni/monitor.so
@@ -652,12 +699,12 @@ usr.img: bare.img $(out)/usr.manifest $(out)/cmdline
 	$(src)/scripts/upload_manifest.py -o $@ -m $(out)/usr.manifest \
 		-D jdkbase=$(jdkbase) -D gccbase=$(gccbase) -D \
 		glibcbase=$(glibcbase) -D miscbase=$(miscbase)
-	$(call quiet, $(src)/scripts/imgedit.py setargs $@ $(shell cat $(out)/cmdline), IMGEDIT $@)
+	$(call quiet, $(src)/scripts/imgedit.py setargs $@ "$(shell cat $(out)/cmdline)", IMGEDIT $@)
 
 $(jni): INCLUDES += -I /usr/lib/jvm/java/include -I /usr/lib/jvm/java/include/linux/
 
-bootfs.bin: scripts/mkbootfs.py $(out)/bootfs.manifest $(tests) $(java_tests) $(tools) \
-		tests/testrunner.so java/java.so java/runjava.jar \
+bootfs.bin: scripts/mkbootfs.py $(java-targets) $(out)/bootfs.manifest $(tests) $(java_tests) $(tools) \
+		tests/testrunner.so \
 		zpool.so zfs.so
 	$(call quiet, $(src)/scripts/mkbootfs.py -o $@ -d $@.d -m $(out)/bootfs.manifest \
 		-D jdkbase=$(jdkbase) -D gccbase=$(gccbase) -D \
@@ -674,18 +721,19 @@ runtime.o: gen/include/ctype-data.h
 gen/include/ctype-data.h: gen-ctype-data
 	$(call quiet, ./gen-ctype-data > $@, GEN $@)
 
-gen-ctype-data: gen-ctype-data.o
-	$(call quiet, $(CXX) -o $@ $^, LD $@)
+gen-ctype-data: gen-ctype-data.cc
+	$(call quiet, $(HOST_CXX) -o $@ $^, HOST_CXX $@)
 
 generated-headers = gen/include/bits/alltypes.h
 generated-headers += gen/include/osv/version.h
 
-gen/include/bits/alltypes.h: $(src)/include/api/x86_64/bits/alltypes.h.sh
+gen/include/bits/alltypes.h: $(src)/include/api/$(arch)/bits/alltypes.h.sh
 	$(call very-quiet, mkdir -p $(dir $@))
 	$(call quiet, sh $^ > $@, GEN $@)
 
 gen/include/osv/version.h: $(src)/scripts/gen-version-header
 	$(call quiet, sh $(src)/scripts/gen-version-header $@, GEN $@)
+.PHONY: gen/include/osv/version.h
 
 $(src)/build.mk: $(generated-headers)
 

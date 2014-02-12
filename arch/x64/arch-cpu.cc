@@ -6,27 +6,30 @@
  */
 
 #include "arch-cpu.hh"
-#include "sched.hh"
-#include "debug.hh"
+#include <osv/sched.hh>
+#include <osv/debug.hh>
 
 namespace sched {
 
-__thread bool in_exception = false;
+__thread unsigned exception_depth = 0;
 
 inline void arch_cpu::enter_exception()
 {
-    if (in_exception) {
-        abort("nested exception");
+    if (exception_depth == nr_exception_stacks - 1) {
+        abort("exception nested too deeply");
     }
-    in_exception = true;
-    auto& s = percpu_exception_stack;
+    auto& s = percpu_exception_stack[exception_depth++];
     set_exception_stack(s, sizeof(s));
 }
 
 inline void arch_cpu::exit_exception()
 {
-    set_exception_stack(&thread::current()->_arch);
-    in_exception = false;
+    if (--exception_depth == 0) {
+        set_exception_stack(&thread::current()->_arch);
+    } else {
+        auto& s = percpu_exception_stack[exception_depth];
+        set_exception_stack(s, sizeof(s));
+    }
 }
 
 exception_guard::exception_guard()

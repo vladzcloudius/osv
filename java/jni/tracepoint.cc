@@ -2,7 +2,7 @@
 #include <osv/trace.hh>
 #include <osv/per-cpu-counter.hh>
 #include <osv/callstack.hh>
-#include <debug.hh>
+#include <osv/debug.hh>
 
 static std::string get_string(JNIEnv* jni, jstring s)
 {
@@ -99,7 +99,8 @@ JNIEXPORT jobjectArray JNICALL Java_com_cloudius_trace_Callstack_collect
     callstack_collector collector(1000, 3, depth);
     collector.attach(*tpp);
     collector.start();
-    sched::thread::sleep_until(nanotime() + millis * 1_ms);
+    using namespace osv::clock::literals;
+    sched::thread::sleep(millis * 1_ms);
     collector.stop();
     std::vector<callstack_collector::trace> r;
     unsigned nr = 0;

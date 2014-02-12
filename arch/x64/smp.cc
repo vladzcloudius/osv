@@ -9,16 +9,16 @@
 #include "processor.hh"
 #include "msr.hh"
 #include "apic.hh"
-#include "mmu.hh"
+#include <osv/mmu.hh>
 #include <string.h>
 extern "C" {
 #include "acpi.h"
 }
 #include <boost/intrusive/parent_from_member.hpp>
-#include "debug.hh"
-#include "sched.hh"
-#include "barrier.hh"
-#include "prio.hh"
+#include <osv/debug.hh>
+#include <osv/sched.hh>
+#include <osv/barrier.hh>
+#include <osv/prio.hh>
 #include "osv/percpu.hh"
 
 extern "C" { void smp_main(void); }
@@ -107,17 +107,18 @@ void smp_launch()
     processor::kvm_pv_eoi_init();
     auto boot_cpu = smp_initial_find_current_cpu();
     for (auto c : sched::cpus) {
+        auto name = osv::sprintf("balancer%d", c->id);
         if (c == boot_cpu) {
             sched::thread::current()->_detached_state->_cpu = c;
             // c->init_on_cpu() already done in main().
             (new sched::thread([c] { c->load_balance(); },
-                    sched::thread::attr().pin(c)))->start();
+                    sched::thread::attr().pin(c).name(name)))->start();
             c->init_idle_thread();
             c->idle_thread->start();
             continue;
         }
         sched::thread::attr attr;
-        attr.stack(81920).pin(c);
+        attr.stack(81920).pin(c).name(name);
         c->init_idle_thread();
         c->bringup_thread = new sched::thread([=] { ap_bringup(c); }, attr, true);
 

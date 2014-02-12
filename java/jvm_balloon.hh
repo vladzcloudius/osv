@@ -9,8 +9,9 @@
 #define JVM_BALLOON_HH_
 
 #include <jni.h>
-#include "mempool.hh"
+#include <osv/mempool.hh>
 #include "exceptions.hh"
+#include <osv/mmu.hh>
 
 class jvm_balloon_shrinker : public memory::shrinker {
 public:
@@ -26,5 +27,5 @@ private:
 };
 
 class balloon;
-void jvm_balloon_fault(balloon *b, exception_frame *ef);
+void jvm_balloon_fault(balloon *b, exception_frame *ef, mmu::jvm_balloon_vma *vma);
 #endif

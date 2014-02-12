@@ -28,8 +28,7 @@
 #include <vector>
 
 #ifdef __OSV__
-#include <sched.hh>
-#include <drivers/clock.hh>
+#include <osv/sched.hh>
 #include <osv/mutex.h>
 #endif
 

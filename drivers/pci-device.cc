@@ -23,7 +23,7 @@ namespace pci {
 
     }
 
-    bool device::parse_pci_config(void)
+    bool device::parse_pci_config()
     {
         function::parse_pci_config();
 
@@ -39,7 +39,9 @@ namespace pci {
             u32 bar_v = pci_readl(pos);
 
             if (bar_v == 0) {
-                break;
+                pos += 4;
+                idx++;
+                continue;
             }
 
             bar * pbar = new bar(this, pos);
@@ -48,20 +50,20 @@ namespace pci {
             pos += pbar->is_64() ? 8 : 4;
         }
 
-        return (true);
+        return true;
     }
 
-    u16 device::get_subsystem_id(void)
+    u16 device::get_subsystem_id()
     {
-        return (_subsystem_id);
+        return _subsystem_id;
     }
 
-    u16 device::get_subsystem_vid(void)
+    u16 device::get_subsystem_vid()
     {
-        return (_subsystem_vid);
+        return _subsystem_vid;
     }
 
-    void device::dump_config(void)
+    void device::dump_config()
     {
         function::dump_config();
 

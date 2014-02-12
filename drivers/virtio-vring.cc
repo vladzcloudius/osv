@@ -6,23 +6,23 @@
  */
 
 #include <string.h>
-#include "mempool.hh"
-#include "mmu.hh"
+#include <osv/mempool.hh>
+#include <osv/mmu.hh>
 
 #include "virtio.hh"
 #include "drivers/virtio-vring.hh"
-#include "debug.hh"
+#include <osv/debug.hh>
 
-#include "sched.hh"
-#include "interrupt.hh"
+#include <osv/sched.hh>
+#include <osv/interrupt.hh>
 #include "osv/trace.hh"
-#include <ilog2.hh>
+#include <osv/ilog2.hh>
 
 using namespace memory;
 using sched::thread;
 
-TRACEPOINT(trace_virtio_enable_interrupts, "vring=%p", void *);
-TRACEPOINT(trace_virtio_disable_interrupts, "vring=%p", void *);
+TRACEPOINT(trace_virtio_enable_interrupts, "vring=%p", void*);
+TRACEPOINT(trace_virtio_disable_interrupts, "vring=%p", void*);
 TRACEPOINT(trace_virtio_kick, "queue=%d", u16);
 TRACEPOINT(trace_virtio_add_buf, "queue=%d, avail=%d", u16, u16);
 
@@ -40,13 +40,13 @@ namespace virtio {
         // Set up pointers        
         assert(is_power_of_two(num));
         _num = num;
-        _desc = (vring_desc *)_vring_ptr;
-        _avail = (vring_avail *)(_vring_ptr + num*sizeof(vring_desc));
-        _used = (vring_used *)(((unsigned long)&_avail->_ring[num] + 
-                sizeof(u16) + VIRTIO_PCI_VRING_ALIGN-1) & ~(VIRTIO_PCI_VRING_ALIGN-1));
+        _desc = (vring_desc*)_vring_ptr;
+        _avail = (vring_avail*)(_vring_ptr + num * sizeof(vring_desc));
+        _used = (vring_used*)(((unsigned long)&_avail->_ring[num] +
+                sizeof(u16) + VIRTIO_PCI_VRING_ALIGN - 1) & ~(VIRTIO_PCI_VRING_ALIGN - 1));
 
         // initialize the next pointer within the available ring
-        for (int i=0;i<num;i++) _desc[i]._next = i+1;
+        for (int i = 0; i < num; i++) _desc[i]._next = i + 1;
         _desc[num-1]._next = 0;
 
         _cookie = new void*[num];
@@ -71,7 +71,7 @@ namespace virtio {
         delete [] _cookie;
     }
 
-    u64 vring::get_paddr(void)
+    u64 vring::get_paddr()
     {
         return mmu::virt_to_phys(_vring_ptr);
     }
@@ -139,7 +139,7 @@ namespace virtio {
                     return false;
                 _desc[idx]._flags = vring_desc::VRING_DESC_F_INDIRECT;
                 _desc[idx]._paddr = mmu::virt_to_phys(indirect);
-                _desc[idx]._len = (_sg_vec.size())*sizeof(vring_desc);
+                _desc[idx]._len = (_sg_vec.size()) * sizeof(vring_desc);
 
                 descp = indirect;
                 //initialize the next pointers
@@ -203,7 +203,7 @@ namespace virtio {
 
 
     void*
-    vring::get_buf_elem(u32 *len)
+    vring::get_buf_elem(u32* len)
     {
             vring_used_elem elem;
             void* cookie = nullptr;
@@ -226,37 +226,37 @@ namespace virtio {
 
     bool vring::avail_ring_not_empty()
     {
-        u16 effective_avail_count = _avail_count + (_used_ring_host_head - _used_ring_guest_head);
-        return (effective_avail_count > 0);
+        u16 effective_avail_count = effective_avail_ring_count();
+        return effective_avail_count > 0;
     }
 
     bool vring::refill_ring_cond()
     {
-        u16 effective_avail_count = _avail_count + (_used_ring_host_head - _used_ring_guest_head);
-        return (effective_avail_count >= _num/2);
+        u16 effective_avail_count = effective_avail_ring_count();
+        return effective_avail_count >= _num/2;
     }
 
     bool vring::avail_ring_has_room(int descriptors)
     {
-        u16 effective_avail_count = _avail_count + (_used_ring_host_head - _used_ring_guest_head);
+        u16 effective_avail_count = effective_avail_ring_count();
         if (use_indirect(descriptors))
             descriptors = 1;
-        return (effective_avail_count >= descriptors);
+        return effective_avail_count >= descriptors;
     }
 
     bool vring::used_ring_not_empty() const
     {
-        return (_used_ring_host_head != _used->_idx.load(std::memory_order_relaxed));
+        return _used_ring_host_head != _used->_idx.load(std::memory_order_relaxed);
     }
 
     bool vring::used_ring_is_half_empty() const
     {
-        return (_used->_idx.load(std::memory_order_relaxed) - _used_ring_host_head > (u16)(_num / 2));
+        return _used->_idx.load(std::memory_order_relaxed) - _used_ring_host_head > (u16)(_num / 2);
     }
 
     bool vring::used_ring_can_gc() const
     {
-        return (_used_ring_guest_head != _used_ring_host_head);
+        return _used_ring_guest_head != _used_ring_host_head;
     }
 
     bool

@@ -5,8 +5,8 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include <debug.hh>
-#include <sched.hh>
+#include <osv/debug.hh>
+#include <osv/sched.hh>
 #include <osv/trace.hh>
 #include <osv/percpu.hh>
 #include <osv/percpu-worker.hh>
@@ -119,9 +119,10 @@ void workman::pcpu_init()
 {
     (*_duty).store(false, std::memory_order_relaxed);
 
+    auto c = sched::cpu::current();
     // Create PCPU Sheriff
     *_work_sheriff = new sched::thread([] { workman::call_of_duty(); },
-        sched::thread::attr().pin(sched::cpu::current()));
+        sched::thread::attr().pin(c).name(osv::sprintf("percpu%d", c->id)));
 
     (*_work_sheriff)->start();
 }

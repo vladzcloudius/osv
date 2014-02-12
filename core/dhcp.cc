@@ -23,9 +23,9 @@
 #include <bsd/porting/networking.hh>
 #include <bsd/porting/route.h>
 
-#include <debug.hh>
-#include <dhcp.hh>
-#include <drivers/clock.hh>
+#include <osv/debug.hh>
+#include <osv/dhcp.hh>
+#include <osv/clock.hh>
 
 namespace osv {
 void set_dns_config(std::vector<boost::asio::ip::address> nameservers,
@@ -160,7 +160,8 @@ namespace dhcp {
             DHCP_OPTION_BROADCAST_ADDRESS};
 
         // Header
-        srand(nanotime());
+        srand((unsigned int)
+                osv::clock::wall::now().time_since_epoch().count());
         pkt->op = BOOTREQUEST;
         pkt->htype = HTYPE_ETHERNET;
         pkt->hlen = ETHER_ADDR_LEN;
@@ -513,12 +514,12 @@ namespace dhcp {
                  dm.get_router_ip().to_string().c_str(),
                  dm.get_interface_mtu());
 
-            osv::start_if(_ifp->if_xname,
-                         dm.get_your_ip().to_string().c_str(),
-                         dm.get_subnet_mask().to_string().c_str());
             if (dm.get_interface_mtu() != 0) {
                 osv::if_set_mtu(_ifp->if_xname, dm.get_interface_mtu());
             }
+            osv::start_if(_ifp->if_xname,
+                          dm.get_your_ip().to_string().c_str(),
+                          dm.get_subnet_mask().to_string().c_str());
 
             osv_route_add_network("0.0.0.0",
                                   "0.0.0.0",
@@ -572,18 +573,26 @@ namespace dhcp {
 
         // Create the worker thread
         _dhcp_thread = new sched::thread([&] { dhcp_worker_fn(); });
+        _dhcp_thread->set_name("dhcp");
         _dhcp_thread->start();
 
-        // Send discover packets!
-        for (auto &it: _universe) {
-            it.second->discover();
-        }
+        do {
+            // Send discover packets!
+            for (auto &it: _universe) {
+                it.second->discover();
+            }
 
-        if (wait) {
-            dhcp_i("Waiting for IP...");
-            _waiter = sched::thread::current();
-            sched::thread::wait_until([&]{ return _have_ip; });
-        }
+            if (wait) {
+                dhcp_i("Waiting for IP...");
+                _waiter = sched::thread::current();
+
+                sched::timer t(*sched::thread::current());
+                using namespace osv::clock::literals;
+                t.set(3_s);
+
+                sched::thread::wait_until([&]{ return _have_ip || t.expired(); });
+            }
+        } while (!_have_ip && wait);
     }
 
     void dhcp_worker::dhcp_worker_fn()

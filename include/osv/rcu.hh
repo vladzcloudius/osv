@@ -11,7 +11,7 @@
 #include <atomic>
 #include <memory>
 #include <functional>
-#include <barrier.hh>
+#include <osv/barrier.hh>
 
 // Read-copy-update implementation
 //
@@ -88,8 +88,21 @@ extern preempt_lock_in_rcu_type preempt_lock_in_rcu;
 extern rcu_lock_in_preempt_type rcu_read_lock_in_preempt_disabled;
 
 template <typename T>
+struct rcu_no_delete {
+    void operator()(T* p) {}
+};
+
+// use rcu_ptr<T, rcu_deleter<T>> to auto-delete
+template <typename T>
+using rcu_deleter = std::default_delete<T>;
+
+template <typename T, typename Disposer = rcu_no_delete<T>>
 class rcu_ptr {
 public:
+    rcu_ptr() {}
+    explicit rcu_ptr(T* p) : _ptr(p) {}
+    ~rcu_ptr();
+
     // Access contents for reading.  Note: must be only called once
     // for an object within a lock()/unlock() pair.
     T* read() const;
@@ -99,7 +112,7 @@ public:
     void assign(std::nullptr_t p);
     // Access contents, must be called with exclusive access wrt.
     // mutator (i.e. in same context as assign().
-    T* read_by_owner();
+    T* read_by_owner() const;
     // Check if the pointer is non-null, can be done outside
     // rcu_read_lock
     operator bool() const;
@@ -141,30 +154,40 @@ inline void rcu_lock_type::unlock()
     sched::preempt_enable();
 }
 
-template <typename T>
+template <typename T, typename Disposer>
 inline
-T* rcu_ptr<T>::read() const
+rcu_ptr<T, Disposer>::~rcu_ptr()
+{
+    // there can no longer be any readers
+    auto p = _ptr.load(std::memory_order_relaxed);
+    Disposer()(p);
+
+}
+
+template <typename T, typename Disposer>
+inline
+T* rcu_ptr<T, Disposer>::read() const
 {
     return _ptr.load(std::memory_order_consume);
 }
 
-template <typename T>
+template <typename T, typename Disposer>
 inline
-void rcu_ptr<T>::assign(T* p)
+void rcu_ptr<T, Disposer>::assign(T* p)
 {
     _ptr.store(p, std::memory_order_release);
 }
 
-template <typename T>
+template <typename T, typename Disposer>
 inline
-void rcu_ptr<T>::assign(std::nullptr_t p)
+void rcu_ptr<T, Disposer>::assign(std::nullptr_t p)
 {
     _ptr.store(p, std::memory_order_relaxed);
 }
 
-template <typename T>
+template <typename T, typename Disposer>
 inline
-rcu_ptr<T>::operator bool() const
+rcu_ptr<T, Disposer>::operator bool() const
 {
     return _ptr.load(std::memory_order_relaxed);
 }
@@ -173,12 +196,14 @@ template <typename T>
 inline
 void rcu_dispose(T* p)
 {
-    rcu_defer(std::default_delete<T>(), p);
+    if (p) {
+        rcu_defer(std::default_delete<T>(), p);
+    }
 }
 
-template <typename T>
+template <typename T, typename Disposer>
 inline
-T* rcu_ptr<T>::read_by_owner()
+T* rcu_ptr<T, Disposer>::read_by_owner() const
 {
     return _ptr.load(std::memory_order_relaxed);
 }
@@ -187,7 +212,9 @@ template <typename T>
 inline
 void rcu_dispose_array(T* p)
 {
-    rcu_defer(std::default_delete<T[]>(), p);
+    if (p) {
+        rcu_defer(std::default_delete<T[]>(), p);
+    }
 }
 
 template <typename T, typename functor>

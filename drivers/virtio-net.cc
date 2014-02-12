@@ -11,10 +11,10 @@
 #include "drivers/virtio.hh"
 #include "drivers/virtio-net.hh"
 #include "drivers/pci-device.hh"
-#include "interrupt.hh"
+#include <osv/interrupt.hh>
 
-#include "mempool.hh"
-#include "mmu.hh"
+#include <osv/mempool.hh>
+#include <osv/mmu.hh>
 
 #include <string>
 #include <string.h>
@@ -23,11 +23,9 @@
 #include <errno.h>
 #include <osv/debug.h>
 
-#include "sched.hh"
+#include <osv/sched.hh>
 #include "osv/trace.hh"
 
-#include "drivers/clock.hh"
-#include "drivers/clockevent.hh"
 
 #include <osv/device.h>
 #include <osv/ioctl.h>
@@ -68,7 +66,7 @@ int net::_instance = 0;
 #define net_w(...)   tprintf_w(net_tag, __VA_ARGS__)
 #define net_e(...)   tprintf_e(net_tag, __VA_ARGS__)
 
-static int if_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
+static int if_ioctl(struct ifnet* ifp, u_long command, caddr_t data)
 {
     net_d("if_ioctl %x", command);
 
@@ -98,14 +96,14 @@ static int if_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
         break;
     }
 
-    return(error);
+    return error;
 }
 
 /**
  * Invalidate the local Tx queues.
  * @param ifp upper layer instance handle
  */
-static void if_qflush(struct ifnet *ifp)
+static void if_qflush(struct ifnet* ifp)
 {
     //
     // TODO: Add per-CPU Tx queues flushing here. Most easily checked with
@@ -218,6 +216,19 @@ void net::fill_qstats(const struct txq& txq,
     out_data->ifi_oerrors  += txq.stats.tx_err + txq.stats.tx_drops;
 }
 
+bool net::ack_irq()
+{
+    auto isr = virtio_conf_readb(VIRTIO_PCI_ISR);
+
+    if (isr) {
+        _rxq.vqueue->disable_interrupts();
+        return true;
+    } else {
+        return false;
+    }
+
+}
+
 net::net(pci::device& dev)
     : virtio_driver(dev),
       _rxq(get_virt_queue(0), [this] { this->receiver(); }),
@@ -233,7 +244,7 @@ net::net(pci::device& dev)
     setup_features();
     read_config();
 
-    _hdr_size = (_mergeable_bufs)? sizeof(net_hdr_mrg_rxbuf):sizeof(net_hdr);
+    _hdr_size = _mergeable_bufs ? sizeof(net_hdr_mrg_rxbuf) : sizeof(net_hdr);
 
     //initialize the BSD interface _if
     _ifn = if_alloc(IFT_ETHER);
@@ -294,10 +305,17 @@ net::net(pci::device& dev)
     _txq.vqueue->disable_interrupts();
 
     ether_ifattach(_ifn, _config.mac);
-    _msi.easy_register({
-        { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
-        { 1, [&] { _txq.vqueue->disable_interrupts(); }, tx_dispatcher_task }
-    });
+
+    if (dev.is_msix()) {
+        _msi.easy_register({
+            { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
+            { 1, [&] { _txq.vqueue->disable_interrupts(); },
+                                                    tx_dispatcher_task }
+        });
+    } else {
+        _gsi.set_ack_and_handler(dev.get_interrupt_line(),
+            [=] { return this->ack_irq(); }, [=] { poll_task->wake(); });
+    }
 
     fill_rx_ring();
 
@@ -319,7 +337,7 @@ net::~net()
     if_free(_ifn);
 }
 
-bool net::read_config()
+void net::read_config()
 {
     //read all of the net config  in one shot
     virtio_conf_read(virtio_pci_config_offset(), &_config, sizeof(_config));
@@ -347,8 +365,6 @@ bool net::read_config()
     net_i("Features: %s=%d,%s=%d", "Host TSO ECN", _host_tso_ecn, "CSUM", _csum);
     net_i("Features: %s=%d,%s=%d", "Guest_csum", _guest_csum, "guest tso4", _guest_tso4);
     net_i("Features: %s=%d", "host tso4", _host_tso4);
-
-    return true;
 }
 
 /**
@@ -361,11 +377,11 @@ bool net::read_config()
  *
  * @return true if csum is bad and false if csum is ok (!!!)
  */
-bool net::bad_rx_csum(struct mbuf *m, struct net_hdr *hdr)
+bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
 {
-    struct ether_header *eh;
-    struct ether_vlan_header *evh;
-    struct udphdr *udp;
+    struct ether_header* eh;
+    struct ether_vlan_header* evh;
+    struct udphdr* udp;
     int csum_len;
     u16 eth_type;
 
@@ -376,10 +392,10 @@ bool net::bad_rx_csum(struct mbuf *m, struct net_hdr *hdr)
     if (m->m_hdr.mh_len < csum_len)
         return true;
 
-    eh = mtod(m, struct ether_header *);
+    eh = mtod(m, struct ether_header*);
     eth_type = ntohs(eh->ether_type);
     if (eth_type == ETHERTYPE_VLAN) {
-        evh = mtod(m, struct ether_vlan_header *);
+        evh = mtod(m, struct ether_vlan_header*);
         eth_type = ntohs(evh->evl_proto);
     }
 
@@ -393,7 +409,7 @@ bool net::bad_rx_csum(struct mbuf *m, struct net_hdr *hdr)
     case offsetof(struct udphdr, uh_sum):
         if (m->m_hdr.mh_len < hdr->csum_start + (int)sizeof(struct udphdr))
             return true;
-        udp = (struct udphdr *)(mtod(m, uint8_t *) + hdr->csum_start);
+        udp = (struct udphdr*)(mtod(m, uint8_t*) + hdr->csum_start);
         if (udp->uh_sum == 0)
             return false;
 
@@ -446,7 +462,7 @@ void net::receiver()
                 continue;
             }
 
-            memcpy(&mhdr, mtod(m, void *), _hdr_size);
+            memcpy(&mhdr, mtod(m, void*), _hdr_size);
 
             if (!_mergeable_bufs) {
                 nbufs = 1;
@@ -499,7 +515,10 @@ void net::receiver()
             rx_packets++;
             rx_bytes += m_head->M_dat.MH.MH_pkthdr.len;
 
-            (*_ifn->if_input)(_ifn, m_head);
+            bool fast_path = _ifn->if_classifier.post_packet(m_head);
+            if (!fast_path) {
+                (*_ifn->if_input)(_ifn, m_head);
+            }
 
             trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
 
@@ -531,12 +550,12 @@ void net::fill_rx_ring()
     vring* vq = _rxq.vqueue;
 
     while (vq->avail_ring_not_empty()) {
-        struct mbuf *m = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR, MCLBYTES);
+        struct mbuf* m = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR, MCLBYTES);
         if (!m)
             break;
 
         m->m_hdr.mh_len = MCLBYTES;
-        u8 *mdata = mtod(m, u8*);
+        u8* mdata = mtod(m, u8*);
 
         vq->init_sg();
         vq->add_in_sg(mdata, m->m_hdr.mh_len);
@@ -710,10 +729,10 @@ void net::txq::xmit_one_locked(void* _req)
 
 mbuf* net::txq::offload(mbuf* m, net_hdr* hdr)
 {
-    struct ether_header *eh;
-    struct ether_vlan_header *evh;
-    struct ip *ip;
-    struct tcphdr *tcp;
+    struct ether_header* eh;
+    struct ether_vlan_header* evh;
+    struct ip* ip;
+    struct tcphdr* tcp;
     int ip_offset;
     u16 eth_type, csum_start;
     u8 ip_proto, gso_type = 0;
@@ -724,7 +743,7 @@ mbuf* net::txq::offload(mbuf* m, net_hdr* hdr)
             return nullptr;
     }
 
-    eh = mtod(m, struct ether_header *);
+    eh = mtod(m, struct ether_header*);
     eth_type = ntohs(eh->ether_type);
     if (eth_type == ETHERTYPE_VLAN) {
         ip_offset = sizeof(struct ether_vlan_header);
@@ -732,7 +751,7 @@ mbuf* net::txq::offload(mbuf* m, net_hdr* hdr)
             if ((m = m_pullup(m, ip_offset)) == nullptr)
                 return nullptr;
         }
-        evh = mtod(m, struct ether_vlan_header *);
+        evh = mtod(m, struct ether_vlan_header*);
         eth_type = ntohs(evh->evl_proto);
     }
 
@@ -744,7 +763,7 @@ mbuf* net::txq::offload(mbuf* m, net_hdr* hdr)
                 return nullptr;
         }
 
-        ip = (struct ip *)(mtod(m, uint8_t *) + ip_offset);
+        ip = (struct ip*)(mtod(m, uint8_t*) + ip_offset);
         ip_proto = ip->ip_p;
         csum_start = ip_offset + (ip->ip_hl << 2);
         gso_type = net::net_hdr::VIRTIO_NET_HDR_GSO_TCPV4;
@@ -770,7 +789,7 @@ mbuf* net::txq::offload(mbuf* m, net_hdr* hdr)
                 return nullptr;
         }
 
-        tcp = (struct tcphdr *)(mtod(m, uint8_t *) + csum_start);
+        tcp = (struct tcphdr*)(mtod(m, uint8_t*) + csum_start);
         hdr->gso_type = gso_type;
         hdr->hdr_len = csum_start + (tcp->th_off << 2);
         hdr->gso_size = m->M_dat.MH.MH_pkthdr.tso_segsz;

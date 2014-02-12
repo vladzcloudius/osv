@@ -11,9 +11,9 @@
 #include <iomanip>
 #include "boost/format.hpp"
 #include "drivers/console.hh"
-#include "sched.hh"
-#include "debug.hh"
-#include "osv/debug.h"
+#include <osv/sched.hh>
+#include <osv/debug.hh>
+#include <osv/debug.h>
 
 using namespace std;
 

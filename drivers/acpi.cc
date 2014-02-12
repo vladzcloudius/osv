@@ -14,11 +14,10 @@ extern "C" {
     #include "acpixf.h"
 }
 #include <stdlib.h>
-#include "mmu.hh"
-#include "sched.hh"
-#include "drivers/clock.hh"
+#include <osv/mmu.hh>
+#include <osv/sched.hh>
 #include "processor.hh"
-#include "align.hh"
+#include <osv/align.hh>
 #include "xen.hh"
 
 #include <osv/debug.h>
@@ -27,9 +26,9 @@ extern "C" {
 
 #include "drivers/console.hh"
 #include "drivers/pci.hh"
-#include "interrupt.hh"
+#include <osv/interrupt.hh>
 
-#include "prio.hh"
+#include <osv/prio.hh>
 
 #define acpi_tag "acpi"
 #define acpi_d(...)   tprintf_d(acpi_tag, __VA_ARGS__)
@@ -37,17 +36,17 @@ extern "C" {
 #define acpi_w(...)   tprintf_w(acpi_tag, __VA_ARGS__)
 #define acpi_e(...)   tprintf_e(acpi_tag, __VA_ARGS__)
 
-ACPI_STATUS AcpiOsInitialize(void)
+ACPI_STATUS AcpiOsInitialize()
 {
     return AE_OK;
 }
 
-ACPI_STATUS AcpiOsTerminate(void)
+ACPI_STATUS AcpiOsTerminate()
 {
     return AE_OK;
 }
 
-ACPI_PHYSICAL_ADDRESS AcpiOsGetRootPointer(void)
+ACPI_PHYSICAL_ADDRESS AcpiOsGetRootPointer()
 {
     ACPI_SIZE rsdp;
     auto st = AcpiFindRootPointer(&rsdp);
@@ -138,7 +137,7 @@ ACPI_STATUS AcpiOsWaitSemaphore(ACPI_SEMAPHORE Handle,
         return AE_OK;
     default:
         sched::timer timer(*sched::thread::current());
-        timer.set(nanotime() + Timeout * 1_ms);
+        timer.set(std::chrono::milliseconds(Timeout));
         return sem->wait(Units, &timer) ? AE_OK : AE_TIME;
     }
 }
@@ -258,7 +257,7 @@ AcpiOsRemoveInterruptHandler(
     return AE_OK;
 }
 
-ACPI_THREAD_ID AcpiOsGetThreadId(void)
+ACPI_THREAD_ID AcpiOsGetThreadId()
 {
     return reinterpret_cast<uintptr_t>(sched::thread::current());
 }
@@ -271,20 +270,20 @@ ACPI_STATUS AcpiOsExecute(
     return AE_NOT_IMPLEMENTED;
 }
 
-void AcpiOsWaitEventsComplete(void)
+void AcpiOsWaitEventsComplete()
 {
     // FIXME: ?
 }
 
 void AcpiOsSleep(UINT64 Milliseconds)
 {
-    sched::thread::sleep_until(clock::get()->time() + Milliseconds * 1000000);
+    sched::thread::sleep(std::chrono::milliseconds(Milliseconds));
 }
 
 void AcpiOsStall(UINT32 Microseconds)
 {
     // spec says to spin, but...
-    sched::thread::sleep_until(clock::get()->time() + u64(Microseconds) * 1000);
+    sched::thread::sleep(std::chrono::microseconds(Microseconds));
 }
 
 ACPI_STATUS AcpiOsReadPort(
@@ -467,7 +466,7 @@ AcpiOsWritable(void *Pointer, ACPI_SIZE Length)
     return true;
 }
 
-UINT64 AcpiOsGetTimer(void)
+UINT64 AcpiOsGetTimer()
 {
     return clock::get()->time() / 100;
 }

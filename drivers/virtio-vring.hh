@@ -11,9 +11,9 @@
 #include <atomic>
 #include <functional>
 #include <osv/mutex.h>
-#include "debug.hh"
-#include "mmu.hh"
-#include "sched.hh"
+#include <osv/debug.hh>
+#include <osv/mmu.hh>
+#include <osv/sched.hh>
 
 #define virtio_tag "virtio"
 #define virtio_d(...)   tprintf_d(virtio_tag, __VA_ARGS__)
@@ -40,14 +40,14 @@ class virtio_driver;
             VRING_DESC_F_INDIRECT=4
         };
 
-        u64 get_paddr(void);
-        u32 get_len(void) { return (_len); }
-        u16 next_idx(void) { return (_next); }
+        u64 get_paddr();
+        u32 get_len() { return _len; }
+        u16 next_idx() { return _next; }
 
         // flags
-        bool is_chained(void) { return ((_flags & VRING_DESC_F_NEXT) == VRING_DESC_F_NEXT); };
-        bool is_write(void) { return ((_flags & VRING_DESC_F_WRITE) == VRING_DESC_F_WRITE); };
-        bool is_indirect(void) { return ((_flags & VRING_DESC_F_INDIRECT) == VRING_DESC_F_INDIRECT); };
+        bool is_chained() { return (_flags & VRING_DESC_F_NEXT) == VRING_DESC_F_NEXT; };
+        bool is_write() { return (_flags & VRING_DESC_F_WRITE) == VRING_DESC_F_WRITE; };
+        bool is_indirect() { return (_flags & VRING_DESC_F_INDIRECT) == VRING_DESC_F_INDIRECT; };
         
         u64 _paddr;
         u32 _len;
@@ -64,8 +64,8 @@ class virtio_driver;
             VRING_AVAIL_F_NO_INTERRUPT=1
         };
 
-        void disable_interrupt(void) { _flags.store(VRING_AVAIL_F_NO_INTERRUPT, std::memory_order_relaxed); }
-        void enable_interrupt(void) { _flags.store(0, std::memory_order_relaxed); }
+        void disable_interrupt() { _flags.store(VRING_AVAIL_F_NO_INTERRUPT, std::memory_order_relaxed); }
+        void enable_interrupt() { _flags.store(0, std::memory_order_relaxed); }
         bool interrupt_on() { return (_flags.load(std::memory_order_relaxed) & VRING_AVAIL_F_NO_INTERRUPT) == 0;}
 
         std::atomic<u16> _flags;
@@ -100,7 +100,7 @@ class virtio_driver;
             VRING_USED_F_NO_NOTIFY=1
         };
 
-        bool notifications_disabled(void) {
+        bool notifications_disabled() {
             return (_flags.load(std::memory_order_relaxed) & VRING_USED_F_NO_NOTIFY) != 0;
         }
         
@@ -121,13 +121,13 @@ class virtio_driver;
         vring(virtio_driver* const dev, u16 num, u16 q_index);
         virtual ~vring();
 
-        u64 get_paddr(void);
+        u64 get_paddr();
         static unsigned get_size(unsigned int num, unsigned long align);
 
         // Ring operations
         bool add_buf(void* cookie);
         // Get the top item from the used ring
-        void* get_buf_elem(u32 *len);
+        void* get_buf_elem(u32* len);
         // Let the host know we consumed the used entry
         // We separate that from get_buf_elem so no one
         // will re-cycle the request header location until
@@ -151,6 +151,10 @@ class virtio_driver;
         // It was separated from the get_buf flow to allow parallelism of the two
         void get_buf_gc();
 
+        inline u16 effective_avail_ring_count()
+        {
+            return _avail_count + (_used_ring_host_head - _used_ring_guest_head);
+        }
         bool used_ring_not_empty() const;
         bool used_ring_is_half_empty() const;
         bool used_ring_can_gc() const;
@@ -184,18 +188,18 @@ class virtio_driver;
             sg_node(const sg_node& n) :_paddr(n._paddr), _len(n._len), _flags(n._flags) {};
         };
 
-        void init_sg(void)
+        void init_sg()
         {
             _sg_vec.clear();
         }
 
-        void add_out_sg(void *vaddr, u32 len)
+        void add_out_sg(void* vaddr, u32 len)
         {
             u64 paddr = mmu::virt_to_phys(vaddr);
             _sg_vec.emplace_back(paddr, len, vring_desc::VRING_DESC_F_READ);
         }
 
-        void add_in_sg(void *vaddr, u32 len)
+        void add_in_sg(void* vaddr, u32 len)
         {
             u64 paddr = mmu::virt_to_phys(vaddr);
             _sg_vec.emplace_back(paddr, len, vring_desc::VRING_DESC_F_WRITE);
@@ -240,18 +244,18 @@ class virtio_driver;
         u16 _avail_count;
 
         // Flat list of chained descriptors
-        vring_desc *_desc;
+        vring_desc* _desc;
         // Available for host consumption
-        vring_avail *_avail;
+        vring_avail* _avail;
         // Available for guest consumption
-        vring_used *_used;
+        vring_used* _used;
         // cookies to store access to the upper layer pointers
         void** _cookie;
         //protects parallel get_bug /add_buf access, mainly the _avail_head variable
         mutex _lock;
         // pointer to the end of the used ring to get a glimpse of the host avail idx
-        std::atomic<u16> *_avail_event;
-        std::atomic<u16> *_used_event;
+        std::atomic<u16>* _avail_event;
+        std::atomic<u16>* _used_event;
         // A flag set by driver to turn on/off indirect descriptor
         bool _use_indirect;
     };

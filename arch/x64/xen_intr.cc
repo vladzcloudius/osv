@@ -10,6 +10,16 @@
 #include <bsd/porting/bus.h>
 #include <machine/intr_machdep.h>
 #include "bitops.h"
+#include <osv/debug.hh>
+
+#include <osv/trace.hh>
+
+// beware: this measures time between interrupts
+TRACEPOINT(trace_xen_irq, "");
+TRACEPOINT(trace_xen_irq_ret, "");
+// this measures time spent processing an interrupt
+TRACEPOINT(trace_xen_irq_exec, "");
+TRACEPOINT(trace_xen_irq_exec_ret, "");
 
 void unmask_evtchn(int vector);
 int evtchn_from_irq(int irq);
@@ -43,7 +53,7 @@ inline unsigned long active_evtchns(unsigned long idx, unsigned long *cpu_mask)
                          ~(xen_shared_info.evtchn_mask[idx].load());
 }
 
-void xen_irq::do_irq(void)
+void xen_irq::do_irq()
 {
     unsigned long l1, l2;
     unsigned long l1i, l2i;
@@ -56,6 +66,7 @@ void xen_irq::do_irq(void)
     else
         memset(cpu_mask, 0, sizeof(cpu_mask));
 
+    trace_xen_irq();
     while (true) {
 
         sched::thread::wait_until([=, &l1] {
@@ -63,6 +74,8 @@ void xen_irq::do_irq(void)
             return l1;
         });
 
+        trace_xen_irq_ret();
+        trace_xen_irq_exec();
         while (l1 != 0) {
             l1i = bsrq(l1);
             l1 &= ~(1ULL << l1i);
@@ -81,13 +94,15 @@ void xen_irq::do_irq(void)
                 unmask_evtchn(port);
             }
         }
+        trace_xen_irq_exec_ret();
+        trace_xen_irq();
     }
 }
 
 void xen_irq::_cpu_init(sched::cpu *c)
 {
     *(_thread.for_cpu(c)) = new sched::thread([this] { xen_irq::do_irq(); },
-            sched::thread::attr().pin(c));
+            sched::thread::attr().pin(c).name(osv::sprintf("xenirq%d\n", c->id)));
     (*(_thread.for_cpu(c)))->start();
 }
 

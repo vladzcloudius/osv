@@ -72,6 +72,21 @@ public:
     static time_point now() {
         return time_point(duration(::clock::get()->time()));
     }
+    /*
+     * Return current estimate of wall-clock time at OSV's boot.
+     *
+     * This is defined as the current difference between uptime::now()
+     * and wall::now(), except that it is calculated faster, and
+     * instantaneously (without taking the two clocks at slightly different
+     * times).
+     *
+     * Note that boot_time() is not necessarily constant. Rather, if we (or
+     * more likely, the host) adjust the wall-clock time, boot_time() will be
+     * adjusted so that always boot_time() + uptime::now() = wall::now().
+     */
+    static time_point boot_time() {
+        return time_point(duration(::clock::get()->boot_time()));
+    }
 };
 
 /**
@@ -110,6 +125,51 @@ constexpr std::chrono::seconds operator "" _s(unsigned long long c) {
 }
 
 }
+}
+
+// Strangely, C++11 does not provide std::abs on std::chrono::duration.
+// But it's easy to fix that lack:
+namespace std {
+template<typename Rep, typename Period>
+std::chrono::duration<Rep,Period> abs(std::chrono::duration<Rep, Period> d)
+{
+    return std::chrono::duration<Rep,Period>(std::abs(d.count()));
+}
+}
+
+// Durations cannot be compared with unit-less integers - one cannot just
+// check d < 7, and need to do something like d < 7_ms. Unfortunately, this
+// also applies to zero: d < 0 won't work, and users need to add a unit to
+// the zero. Of course, any unit would work: d < 0_ms, or d < 0_ns, or
+// any other time unit, will be equivalent.
+// The following trick will allow comparing a duration to 0 without needing to
+// add a unit, while still leaving comparison with a non-zero integer as an
+// error. This trick works by allowing to compare a duration with nullptr_t,
+// and noting that the compiler allows implicit conversion of the constant 0,
+// but not other integer constants, to nullptr_t.
+
+template<typename Rep, typename Period>
+inline bool operator<=(std::chrono::duration<Rep, Period> d, std::nullptr_t)
+{
+    return d.count() <= 0;
+}
+
+template<typename Rep, typename Period>
+inline bool operator<(std::chrono::duration<Rep, Period> d, std::nullptr_t)
+{
+    return d.count() < 0;
+}
+
+template<typename Rep, typename Period>
+inline bool operator>=(std::chrono::duration<Rep, Period> d, std::nullptr_t)
+{
+    return d.count() >= 0;
+}
+
+template<typename Rep, typename Period>
+inline bool operator>(std::chrono::duration<Rep, Period> d, std::nullptr_t)
+{
+    return d.count() > 0;
 }
 
 #endif /* OSV_CLOCK_HH_ */

@@ -63,6 +63,7 @@ typedef enum {
 
 struct vnode;
 struct file;
+struct pollreq;
 
 #define FDMAX       (0x4000)
 
@@ -85,6 +86,8 @@ struct file {
 	virtual int stat(struct stat* buf) = 0;
 	virtual int close() = 0;
 	virtual int chmod(mode_t mode) = 0;
+	virtual void poll_install(pollreq& pr) {}
+	virtual void poll_uninstall(pollreq& pr) {}
 
 	int		f_flags;	/* open flags */
 	int		f_count;	/* reference count, see below */
@@ -95,6 +98,9 @@ struct file {
 	TAILQ_HEAD(, poll_link) f_poll_list; /* poll request list */
 	mutex_t		f_lock;		/* lock */
 	std::unique_ptr<std::vector<file*>> f_epolls;
+	// poll_wake_count used for implementing epoll()'s EPOLLET using poll().
+	// Once we have a real epoll() implementation, it won't be needed.
+	int poll_wake_count = 0;
 };
 
 // struct file above is an abstract class; subclasses need to implement 8

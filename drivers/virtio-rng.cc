@@ -6,7 +6,7 @@
  */
 
 #include "drivers/virtio-rng.hh"
-#include "mmu.hh"
+#include <osv/mmu.hh>
 #include <algorithm>
 #include <iterator>
 
@@ -15,8 +15,8 @@ using namespace std;
 namespace virtio {
 rng::rng(pci::device& pci_dev)
     : virtio_driver(pci_dev)
-    , _gsi(pci_dev.get_interrupt_line(), [&] { ack_irq(); }, [&] { handle_irq(); })
-    , _thread([&] { worker(); })
+    , _gsi(pci_dev.get_interrupt_line(), [&] { return ack_irq(); }, [&] { handle_irq(); })
+    , _thread([&] { worker(); }, sched::thread::attr().name("virtio-rng"))
 {
     _queue = get_virt_queue(0);
 
@@ -31,7 +31,7 @@ rng::~rng()
 {
 }
 
-size_t rng::get_random_bytes(char *buf, size_t size)
+size_t rng::get_random_bytes(char* buf, size_t size)
 {
     WITH_LOCK(_mtx) {
         _consumer.wait_until(_mtx, [&] {
@@ -50,9 +50,9 @@ void rng::handle_irq()
     _thread.wake();
 }
 
-void rng::ack_irq()
+bool rng::ack_irq()
 {
-    virtio_conf_readb(VIRTIO_PCI_ISR);
+    return virtio_conf_readb(VIRTIO_PCI_ISR);
 }
 
 void rng::worker()
@@ -74,7 +74,7 @@ void rng::refill()
     vector<char> buf(remaining);
     u32 len;
     DROP_LOCK(_mtx) {
-        void *data = buf.data();
+        void* data = buf.data();
 
         _queue->init_sg();
         _queue->add_in_sg(data, remaining);
@@ -95,7 +95,7 @@ void rng::refill()
     copy_n(buf.begin(), len, back_inserter(_entropy));
 }
 
-hw_driver* rng::probe(hw_device *dev)
+hw_driver* rng::probe(hw_device* dev)
 {
     return virtio::probe<rng, VIRTIO_RNG_DEVICE_ID>(dev);
 }

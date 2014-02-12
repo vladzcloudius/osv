@@ -8,8 +8,7 @@
 #include <map>
 #include <list>
 #include <errno.h>
-#include "drivers/clock.hh"
-#include "sched.hh"
+#include <osv/sched.hh>
 #include "osv/trace.hh"
 
 #include <bsd/porting/netport.h>
@@ -86,8 +85,7 @@ int synch_port::_msleep(void *chan, struct mtx *mtx,
 
     if (timo_hz) {
         u64 nanoseconds = ticks2ns(timo_hz);
-        u64 cur_time = clock::get()->time();
-        t.set(cur_time + nanoseconds);
+        t.set(std::chrono::nanoseconds(nanoseconds));
     }
 
     trace_synch_msleep_wait(chan, timo_hz);

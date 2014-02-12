@@ -5,7 +5,7 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "sched.hh"
+#include <osv/sched.hh>
 #include <cstdlib>
 #include <cstring>
 #include <string.h>
@@ -31,22 +31,22 @@
 #include <cassert>
 #include <sys/sysinfo.h>
 #include "processor.hh"
-#include "debug.hh"
+#include <osv/debug.hh>
 #include <boost/format.hpp>
-#include "mempool.hh"
+#include <osv/mempool.hh>
 #include <pwd.h>
 #include <fcntl.h>
-#include "barrier.hh"
+#include <osv/barrier.hh>
 #include "smp.hh"
 #include "bsd/sys/sys/sysctl.h"
 #include <osv/power.hh>
 #include <sys/time.h>
-#include "mmu.hh"
+#include <osv/mmu.hh>
 #include "libc/libc.hh"
 #include <api/sys/times.h>
 #include <map>
 #include <boost/range/adaptor/reversed.hpp>
-#include "align.hh"
+#include <osv/align.hh>
 #include <osv/stubbing.hh>
 #include "drivers/pvpanic.hh"
 #include <api/sys/resource.h>
@@ -80,10 +80,18 @@ void abort()
     abort("Aborted\n");
 }
 
-void abort(const char *msg)
+void abort(const char *fmt, ...)
 {
     if (!already_aborted) {
         already_aborted = true;
+
+        static char msg[1024];
+        va_list ap;
+
+        va_start(ap, fmt);
+        vsnprintf(msg, sizeof(msg), fmt, ap);
+        va_end(ap);
+
         debug_ll(msg);
         panic::pvpanic::panicked();
     }

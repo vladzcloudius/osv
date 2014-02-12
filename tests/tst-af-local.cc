@@ -8,8 +8,8 @@
 #include <sys/socket.h>
 #include <sys/poll.h>
 #include <unistd.h>
-#include "sched.hh"
-#include "debug.hh"
+#include <osv/sched.hh>
+#include <osv/debug.hh>
 
 int tests = 0, fails = 0;
 

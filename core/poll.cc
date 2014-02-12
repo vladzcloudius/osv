@@ -47,7 +47,7 @@
 
 #include <osv/file.h>
 #include <osv/poll.h>
-#include <osv/debug.h>
+#include <sys/epoll.h>
 
 #include <bsd/porting/netport.h>
 #include <bsd/porting/synch.h>
@@ -124,6 +124,20 @@ int poll_scan(std::vector<poll_file>& _pfd)
         }
 
         entry->revents = fp->poll(entry->events);
+
+        // Hack for implementing epoll() over poll(). Note we can't avoid the
+        // above fp->poll() call, because sockets have the SB_SEL optimization
+        // where only their poll (so_poll_generic()) turns on SB_SEL.
+        if (entry->events & EPOLLET) {
+            WITH_LOCK(fp->f_lock) {
+                if (entry->last_poll_wake_count == fp->poll_wake_count) {
+                    entry->revents = 0;
+                    continue;
+                }
+                entry->last_poll_wake_count = fp->poll_wake_count;
+            }
+        }
+
         if (entry->revents) {
             nr_events++;
         }
@@ -166,6 +180,10 @@ int poll_wake(struct file* fp, int events)
         }
     }
 
+    // poll_wake_count is used for implementing epoll()'s EPOLLET
+    // over regular poll().
+    ++fp->poll_wake_count;
+
     FD_UNLOCK(fp);
     fdrop(fp);
 
@@ -205,8 +223,15 @@ void poll_install(struct pollreq* p)
         // cannot be requested by the user (e.g., POLLHUP).
         pl->_events = entry->events | ~POLL_REQUESTABLE;
 
+        fp->poll_install(*p);
         FD_LOCK(fp);
         TAILQ_INSERT_TAIL(&fp->f_poll_list, pl, _link);
+        if (entry->events & EPOLLET &&
+                entry->last_poll_wake_count == fp->poll_wake_count) {
+            // In this case, don't use fp->poll() to check for missed event
+            FD_UNLOCK(fp);
+            continue;
+        }
         FD_UNLOCK(fp);
         // We need to check if we missed an event on this file just before
         // installing the poll request on it above.
@@ -236,6 +261,7 @@ void poll_uninstall(struct pollreq* p)
             continue;
         }
 
+        fp->poll_uninstall(*p);
         /* Search for current pollreq and remove it from list */
         FD_LOCK(fp);
         TAILQ_FOREACH(pl, &fp->f_poll_list, _link) {
@@ -253,50 +279,56 @@ void poll_uninstall(struct pollreq* p)
 int do_poll(std::vector<poll_file>& pfd, int _timeout)
 {
     int nr_events;
-    struct pollreq p = {};
+    unique_ptr<pollreq> p{new pollreq};
     sched::timer tmr(*sched::thread::current());
 
-    p._nfds = pfd.size();
-    p._timeout = _timeout;
-    p._pfd = std::move(pfd);
+    p->_nfds = pfd.size();
+    p->_timeout = _timeout;
+    p->_pfd = std::move(pfd);
 
     /* Any existing events return immediately */
-    nr_events = poll_scan(p._pfd);
+    nr_events = poll_scan(p->_pfd);
     if (nr_events) {
-        pfd = std::move(p._pfd);
+        pfd = std::move(p->_pfd);
         goto out;
     }
 
     /* Timeout -> Don't wait... */
-    if (p._timeout == 0) {
-        pfd = std::move(p._pfd);
+    if (p->_timeout == 0) {
+        pfd = std::move(p->_pfd);
         goto out;
     }
 
     /* Add pollreq references */
-    poll_install(&p);
+    poll_install(p.get());
 
     /* Timeout */
-    if (p._timeout > 0) {
+    if (p->_timeout > 0) {
         /* Convert timeout of ms to ns */
-        tmr.set(clock::get()->time() + p._timeout * 1_ms);
+        using namespace osv::clock::literals;
+        tmr.set(p->_timeout * 1_ms);
     }
 
     /* Block  */
-    sched::thread::wait_until([&] {
-        return p._awake.load(memory_order_relaxed) || tmr.expired();
-    });
+    do {
+        sched::thread::wait_until([&] {
+            return p->_awake.load(memory_order_relaxed) || tmr.expired();
+        });
 
-    nr_events = 0;
-    if (p._awake.load(memory_order_relaxed)) {
-        nr_events = poll_scan(p._pfd);
-    }
+        nr_events = 0;
+        if (p->_awake.load(memory_order_relaxed)) {
+            p->_awake.store(false, memory_order_relaxed);
+            nr_events = poll_scan(p->_pfd);
+        }
+    } while (!nr_events && !tmr.expired());
 
     /* Remove pollreq references */
-    poll_uninstall(&p);
+    poll_uninstall(p.get());
 
-    pfd = std::move(p._pfd);
+    pfd = std::move(p->_pfd);
 out:
+    p->_poll_thread = nullptr;
+    osv::rcu_dispose(p.release());
     return nr_events;
 }
 

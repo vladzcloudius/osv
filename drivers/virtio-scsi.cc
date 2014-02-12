@@ -8,10 +8,10 @@
 
 #include <sys/cdefs.h>
 
-#include "mmu.hh"
-#include "mempool.hh"
-#include "sched.hh"
-#include "interrupt.hh"
+#include <osv/mmu.hh>
+#include <osv/mempool.hh>
+#include <osv/sched.hh>
+#include <osv/interrupt.hh>
 #include "drivers/pci-device.hh"
 #include "drivers/virtio.hh"
 #include "drivers/virtio-scsi.hh"
@@ -35,6 +35,7 @@ namespace virtio {
 int scsi::_instance = 0;
 
 struct scsi_priv {
+    devop_strategy_t strategy;
     scsi* drv;
     u16 target;
     u16 lun;
@@ -43,23 +44,16 @@ struct scsi_priv {
 static void scsi_strategy(struct bio *bio)
 {
     auto prv = scsi::get_priv(bio);
-    bio->bio_offset += bio->bio_dev->offset;
     prv->drv->make_request(bio);
 }
 
 static int scsi_read(struct device *dev, struct uio *uio, int ioflags)
 {
-    if (uio->uio_offset + uio->uio_resid > dev->size)
-        return EIO;
-
     return bdev_read(dev, uio, ioflags);
 }
 
 static int scsi_write(struct device *dev, struct uio *uio, int ioflags)
 {
-    if (uio->uio_offset + uio->uio_resid > dev->size)
-        return EIO;
-
     return bdev_write(dev, uio, ioflags);
 }
 
@@ -70,7 +64,7 @@ static struct devops scsi_devops {
     scsi_write,
     no_ioctl,
     no_devctl,
-    scsi_strategy,
+    multiplex_strategy,
 };
 
 struct driver scsi_driver = {
@@ -154,9 +148,18 @@ std::vector<u16> scsi::exec_report_luns(u16 target)
     if (response != VIRTIO_SCSI_S_OK)
         throw std::runtime_error("Fail to exec_report_luns");
 
-    auto list_len = be32toh(data->list_len);
-    for (unsigned i = 0; i < list_len / 8; i++)
-        luns.push_back((data->list[i] & 0xffff) >> 8);
+    auto status = req->resp.cmd.status;
+    if (status == VIRTIO_SCSI_S_OK) {
+        auto list_len = be32toh(data->list_len);
+        for (unsigned i = 0; i < list_len / 8; i++) {
+            luns.push_back((data->list[i] & 0xffff) >> 8);
+        }
+    } else {
+        // Report LUNS is not implemented
+        for (u16 lun = 0; lun < _config.max_lun; lun++) {
+                luns.push_back(lun);
+        }
+    }
     std::sort(luns.begin(),luns.end());
 
     delete req;
@@ -249,6 +252,11 @@ void scsi::exec_test_unit_ready(u16 target, u16 lun)
     if (response != VIRTIO_SCSI_S_OK)
         throw std::runtime_error("Fail to exec_test_unit_ready");
 
+    auto status = req->resp.cmd.status;
+    if (status != VIRTIO_SCSI_S_OK) {
+        throw std::runtime_error("Fail to exec_test_unit_ready");
+    }
+
     delete req;
 }
 
@@ -286,6 +294,24 @@ void scsi::exec_request_sense(u16 target, u16 lun)
     delete data;
 }
 
+bool scsi::test_lun(u16 target, u16 lun)
+{
+    bool ready = false;
+    u8 nr = 0;
+
+    do {
+        try {
+            exec_inquery(target, lun);
+            exec_test_unit_ready(target, lun);
+        } catch (std::runtime_error err) {
+            nr++;
+            continue;
+        }
+        ready = true;
+    } while (nr < 2 && !ready);
+
+    return ready;
+}
 
 void scsi::add_lun(u16 target, u16 lun)
 {
@@ -293,15 +319,8 @@ void scsi::add_lun(u16 target, u16 lun)
     struct device *dev;
     size_t devsize;
 
-    exec_inquery(target, lun);
-
-    try {
-        exec_test_unit_ready(target, lun);
-    } catch (std::runtime_error err) {
-        printf("virtio-scsi: %s\n", err.what());
-        exec_request_sense(target, lun);
+    if (!test_lun(target, lun))
         return;
-    }
 
     exec_read_capacity(target, lun, devsize);
 
@@ -309,21 +328,22 @@ void scsi::add_lun(u16 target, u16 lun)
     dev_name += std::to_string(_disk_idx++);
     dev = device_create(&scsi_driver, dev_name.c_str(), D_BLK);
     prv = static_cast<struct scsi_priv*>(dev->private_data);
+    prv->strategy = scsi_strategy;
     prv->drv = this;
     prv->target = target;
     prv->lun = lun;
     dev->size = devsize;
+    dev->max_io_size = _config.max_sectors * VIRTIO_SCSI_SECTOR_SIZE;
     read_partition_table(dev);
 
     printf("virtio-scsi: Add scsi device target=%d, lun=%-3d as %s, devsize=%lld\n", target, lun, dev_name.c_str(), devsize);
 
 }
 
-
-void scsi::scan(void)
+void scsi::scan()
 {
     /* TODO: Support more target */
-    for (u16 target = 0; target < 1; target++) {
+    for (u16 target = 1; target < 2; target++) {
         try {
             auto luns = exec_report_luns(target);
             for (auto &lun : luns) {
@@ -333,6 +353,20 @@ void scsi::scan(void)
             printf("virtio-scsi: %s\n", err.what());
         }
     }
+}
+
+bool scsi::ack_irq()
+{
+    auto isr = virtio_conf_readb(VIRTIO_PCI_ISR);
+    auto queue = get_virt_queue(VIRTIO_SCSI_QUEUE_REQ);
+
+    if (isr) {
+        queue->disable_interrupts();
+        return true;
+    } else {
+        return false;
+    }
+
 }
 
 scsi::scsi(pci::device& dev)
@@ -346,14 +380,20 @@ scsi::scsi(pci::device& dev)
     read_config();
 
     //register the single irq callback for the block
-    sched::thread* t = new sched::thread([this] { this->req_done(); });
+    sched::thread* t = new sched::thread([this] { this->req_done(); },
+            sched::thread::attr().name("virtio-scsi"));
     t->start();
     auto queue = get_virt_queue(VIRTIO_SCSI_QUEUE_REQ);
-    _msi.easy_register({
-            { VIRTIO_SCSI_QUEUE_CTRL, nullptr, nullptr },
-            { VIRTIO_SCSI_QUEUE_EVT, nullptr, nullptr },
-            { VIRTIO_SCSI_QUEUE_REQ, [=] { queue->disable_interrupts(); }, t },
-    });
+
+    if (dev.is_msix()) {
+        _msi.easy_register({
+                { VIRTIO_SCSI_QUEUE_CTRL, nullptr, nullptr },
+                { VIRTIO_SCSI_QUEUE_EVT, nullptr, nullptr },
+                { VIRTIO_SCSI_QUEUE_REQ, [=] { queue->disable_interrupts(); }, t },
+        });
+    } else {
+        _gsi.set_ack_and_handler(dev.get_interrupt_line(), [=] { return this->ack_irq(); }, [=] { t->wake(); });
+    }
 
     // Enable indirect descriptor
     queue->set_use_indirect(true);
@@ -400,10 +440,9 @@ scsi::scsi_req::scsi_req(struct bio* bio, u16 target, u16 lun, u8 cmd)
     };
 }
 
-bool scsi::read_config()
+void scsi::read_config()
 {
     virtio_conf_read(virtio_pci_config_offset(), &_config, sizeof(_config));
-    return true;
 }
 
 void scsi::req_done()
@@ -420,7 +459,7 @@ void scsi::req_done()
             auto response = req->resp.cmd.response;
             auto bio = req->bio;
 
-            assert(req->resp.cmd.response == VIRTIO_SCSI_S_OK);
+            assert(response == VIRTIO_SCSI_S_OK);
 
             // Other req type will be freed by the caller who send the bio
             if (req->bio->bio_cmd != BIO_SCSI)
@@ -461,10 +500,10 @@ int scsi::make_request(struct bio* bio)
     return 0;
 }
 
-u32 scsi::get_driver_features(void)
+u32 scsi::get_driver_features()
 {
     auto base = virtio_driver::get_driver_features();
-    return (base | ( 1 << VIRTIO_SCSI_F_INOUT));
+    return base | ( 1 << VIRTIO_SCSI_F_INOUT);
 }
 
 hw_driver* scsi::probe(hw_device* dev)

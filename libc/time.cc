@@ -12,7 +12,7 @@
 #include <osv/stubbing.hh>
 #include "libc.hh"
 #include <osv/clock.hh>
-#include "sched.hh"
+#include <osv/sched.hh>
 
 u64 convert(const timespec& ts)
 {
@@ -34,23 +34,15 @@ int gettimeofday(struct timeval* tv, struct timezone* tz)
 
 int nanosleep(const struct timespec* req, struct timespec* rem)
 {
-    sched::thread::sleep_until(clock::get()->time() + convert(*req));
+    sched::thread::sleep(std::chrono::nanoseconds(convert(*req)));
     return 0;
 }
 
 int usleep(useconds_t usec)
 {
-    sched::thread::sleep_until(clock::get()->time() + usec * 1_us);
+    sched::thread::sleep(std::chrono::microseconds(usec));
     return 0;
 }
-
-// Temporary until all clock primitives functions on std::chrono
-static void fill_ts(s64 time, struct timespec *ts)
-{
-    ts->tv_sec  =  time / 1000000000;
-    ts->tv_nsec =  time % 1000000000;
-}
-
 
 // Convenient inline function for converting std::chrono::duration,
 // of a clock with any period, into the classic Posix "struct timespec":

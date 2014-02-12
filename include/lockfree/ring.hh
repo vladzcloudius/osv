@@ -14,8 +14,8 @@
 #include <atomic>
 #include <osv/sched.hh>
 #include <arch.hh>
-#include <ilog2.hh>
-#include "debug.hh"
+#include <osv/ilog2.hh>
+#include <osv/debug.hh>
 
 //
 // spsc ring of fixed size

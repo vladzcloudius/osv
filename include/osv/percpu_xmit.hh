@@ -12,7 +12,7 @@
 #include <lockfree/ring.hh>
 #include <lockfree/queue-mpsc.hh>
 
-#include <drivers/clock.hh>
+#include <osv/clock.hh>
 
 #include <bsd/sys/sys/mbuf.h>
 
@@ -41,7 +41,7 @@ public:
      * Two objects are compared by their timestamps.
      */
     struct buff_desc {
-        s64 ts;
+        clock::uptime::time_point ts;
         void* cooky;
 
         bool operator>(const buff_desc& other) const
@@ -78,7 +78,7 @@ public:
      * @param it iterator handle
      */
     void erase(iterator& it) {
-        value_type tmp = { 0 };
+        value_type tmp;
         _r.pop(tmp);
         _popped_since_wakeup++;
 
@@ -379,8 +379,9 @@ private:
     /**
      * @return the current timestamp
      */
-    s64 get_ts() {
-        return clock::get()->uptime();
+    clock::uptime::time_point get_ts() {
+        return clock::uptime::now();
+
     }
 
     // RUNNING state controling functions

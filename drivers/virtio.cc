@@ -28,7 +28,7 @@ virtio_driver::virtio_driver(pci::device& dev)
     , _bar1(nullptr)
     , _cap_indirect_buf(false)
 {
-    for (unsigned i=0; i < max_virtqueues_nr; i++) {
+    for (unsigned i = 0; i < max_virtqueues_nr; i++) {
         _queues[i] = nullptr;
     }
     parse_pci_config();
@@ -53,7 +53,7 @@ virtio_driver::~virtio_driver()
     free_queues();
 }
 
-bool virtio_driver::setup_features()
+void virtio_driver::setup_features()
 {
     u32 dev_features = get_device_features();
     u32 drv_features = this->get_driver_features();
@@ -62,7 +62,7 @@ bool virtio_driver::setup_features()
 
     //notify the host about the features in used according
     //to the virtio spec
-    for (int i=0;i<32;i++)
+    for (int i = 0; i < 32; i++)
         if (subset & (1 << i))
             virtio_d("%s: found feature intersec of bit %d", __FUNCTION__,  i);
 
@@ -73,9 +73,6 @@ bool virtio_driver::setup_features()
             set_event_idx_cap(true);
 
     set_guest_features(subset);
-
-    return subset != 0;
-
 }
 
 void virtio_driver::dump_config()
@@ -84,13 +81,13 @@ void virtio_driver::dump_config()
     _dev.get_bdf(B, D, F);
 
     _dev.dump_config();
-    virtio_d("%s [%x:%x.%x] vid:id= %x:%x", get_name().c_str(),
+    virtio_d("%s [%x:%x.%x] vid:id=%x:%x", get_name().c_str(),
         (u16)B, (u16)D, (u16)F,
         _dev.get_vendor_id(),
         _dev.get_device_id());
 
     virtio_d("    virtio features: ");
-    for (int i=0;i<32;i++)
+    for (int i = 0; i < 32; i++)
         virtio_d(" %d ", get_device_feature_bit(i));
 }
 
@@ -130,7 +127,7 @@ void virtio_driver::reset_host_side()
 
 void virtio_driver::free_queues()
 {
-    for (unsigned i=0; i < max_virtqueues_nr; i++) {
+    for (unsigned i = 0; i < max_virtqueues_nr; i++) {
         if (nullptr != _queues[i]) {
             delete (_queues[i]);
             _queues[i] = nullptr;
@@ -144,14 +141,14 @@ bool virtio_driver::kick(int queue)
     return true;
 }
 
-bool virtio_driver::probe_virt_queues()
+void virtio_driver::probe_virt_queues()
 {
     u16 qsize = 0;
 
     do {
 
         if (_num_queues >= max_virtqueues_nr) {
-            return false;
+            return;
         }
 
         // Read queue size
@@ -162,7 +159,7 @@ bool virtio_driver::probe_virt_queues()
         }
 
         // Init a new queue
-        vring * queue = new vring(this, qsize, _num_queues);
+        vring* queue = new vring(this, qsize, _num_queues);
         _queues[_num_queues] = queue;
 
         if (_dev.is_msix()) {
@@ -170,7 +167,7 @@ bool virtio_driver::probe_virt_queues()
             virtio_conf_writew(VIRTIO_MSI_QUEUE_VECTOR, _num_queues);
             if (virtio_conf_readw(VIRTIO_MSI_QUEUE_VECTOR) != _num_queues) {
                 virtio_e("Setting MSIx entry for queue %d failed.", _num_queues);
-                return false;
+                return;
             }
         }
 
@@ -185,8 +182,6 @@ bool virtio_driver::probe_virt_queues()
         virtio_d("Queue[%d] -> size %d, paddr %x", (_num_queues-1), qsize, queue->get_paddr());
 
     } while (true);
-
-    return true;
 }
 
 vring* virtio_driver::get_virt_queue(unsigned idx)
@@ -286,15 +281,15 @@ void virtio_driver::set_virtio_config_bit(u32 offset, int bit, bool on)
 void virtio_driver::virtio_conf_write(u32 offset, void* buf, int length)
 {
     u8* ptr = reinterpret_cast<u8*>(buf);
-    for (int i=0;i<length;i++)
-        _bar1->writeb(offset+i, ptr[i]);
+    for (int i = 0; i < length; i++)
+        _bar1->writeb(offset + i, ptr[i]);
 }
 
 void virtio_driver::virtio_conf_read(u32 offset, void* buf, int length)
 {
     unsigned char* ptr = reinterpret_cast<unsigned char*>(buf);
-    for (int i=0;i<length;i++)
-        ptr[i] = _bar1->readb(offset+i);
+    for (int i = 0; i < length; i++)
+        ptr[i] = _bar1->readb(offset + i);
 }
 
 }

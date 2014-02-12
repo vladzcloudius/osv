@@ -118,7 +118,7 @@ public:
 
     bool parse_pci_config();
 
-    bool probe_virt_queues();
+    void probe_virt_queues();
     vring* get_virt_queue(unsigned idx);
 
     // block the calling thread until the queue has some used elements in it.
@@ -165,13 +165,13 @@ public:
 protected:
     // Actual drivers should implement this on top of the basic ring features
     virtual u32 get_driver_features() { return 1 << VIRTIO_RING_F_INDIRECT_DESC | 1 << VIRTIO_RING_F_EVENT_IDX; }
-    bool setup_features();
+    void setup_features();
 protected:
     pci::device& _dev;
     interrupt_manager _msi;
     vring* _queues[max_virtqueues_nr];
     u32 _num_queues;
-    pci::bar *_bar1;
+    pci::bar* _bar1;
     bool _cap_indirect_buf;
     bool _cap_event_idx = false;
     static int _disk_idx;

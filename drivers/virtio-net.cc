@@ -651,6 +651,10 @@ int net::txq::try_xmit_one_locked(net_req* req)
 
     DEBUG_ASSERT(!try_lock_running(), "RUNNING lock not taken!\n");
 
+    if (_parent->_mergeable_bufs) {
+        req->mhdr.num_buffers = 0;
+    }
+
     vqueue->init_sg();
     vqueue->add_out_sg(static_cast<void*>(&req->mhdr),
                        sizeof(net_hdr_mrg_rxbuf));
@@ -667,7 +671,6 @@ int net::txq::try_xmit_one_locked(net_req* req)
         }
     }
 
-    req->mhdr.num_buffers = vec_sz;
     req->tx_bytes = tx_bytes;
 
     if (!vqueue->avail_ring_has_room(vec_sz)) {

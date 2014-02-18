@@ -139,6 +139,11 @@ private:
     lockfree::queue_mpsc<wait_record> _waitq;
     ring_spsc<value_type, CpuTxqSize> _r;
 
+    //
+    // We don't want to wake the waiters when the Tx worker is going to sleep.
+    // We would like them to work in parallel, so half a ring should be just
+    // fine as a threshold.
+    //
     static const int _wakeup_threshold = CpuTxqSize / 2;
     int _popped_since_wakeup = 0;
 

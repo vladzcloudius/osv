@@ -260,7 +260,7 @@ namespace virtio {
     }
 
     bool
-    vring::kick() {
+    vring::kick(bool kick_now) {
         bool kicked = true;
 
         if (_dev->get_event_idx_cap()) {
@@ -270,7 +270,7 @@ namespace virtio {
         } else if (_used->notifications_disabled())
             return false;
 
-        if (kicked) {
+        if (kick_now || kicked) {
             trace_virtio_kick(_q_index);
             _dev->kick(_q_index);
             _avail_added_since_kick = 0;

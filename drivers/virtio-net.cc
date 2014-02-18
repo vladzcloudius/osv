@@ -136,18 +136,18 @@ int net::xmit(struct mbuf* buff)
     return _txq.xmit(buff);
 }
 
-inline bool net::txq::kick_hw()
+inline bool net::txq::kick_hw(bool kick_now)
 {
-    return vqueue->kick();
+    return vqueue->kick(kick_now);
 }
 
-inline void net::txq::kick_pending(u16 thresh)
+inline void net::txq::kick_pending(u16 thresh, bool kick_now)
 {
     if (_pkts_to_kick >= thresh) {
         stats.tx_pkts_from_disp += _pkts_to_kick;
         _pkts_to_kick = 0;
         stats.tx_kicks++;
-        if (kick_hw()) {
+        if (kick_hw(kick_now)) {
             stats.tx_hv_kicks++;
         }
     }
@@ -301,16 +301,13 @@ net::net(pci::device& dev)
 
     /* TODO: What if_init() is for? */
     tx_dispatcher_task->start();
-    // Start with Tx interrupts disabled
-    _txq.vqueue->disable_interrupts();
 
     ether_ifattach(_ifn, _config.mac);
 
     if (dev.is_msix()) {
         _msi.easy_register({
             { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
-            { 1, [&] { _txq.vqueue->disable_interrupts(); },
-                                                    tx_dispatcher_task }
+            { 1, [&] { _txq.vqueue->disable_interrupts(); }, nullptr }
         });
     } else {
         _gsi.set_ack_and_handler(dev.get_interrupt_line(),
@@ -710,11 +707,13 @@ void net::txq::xmit_one_locked(void* _req)
 
     if (try_xmit_one_locked(req)) {
         do {
-            // We are going to sleep - kick() the pending packets
-            kick_pending();
-
-            _parent->virtio_driver::wait_for_queue(vqueue,
-                                                   &vring::used_ring_not_empty);
+            // We are going to poll - kick() the pending packets
+            kick_pending(1, true);
+            if (!vqueue->used_ring_not_empty()) {
+                do {
+                    sched::thread::yield();
+                } while (!vqueue->used_ring_not_empty());
+            }
             gc();
         } while (!vqueue->add_buf(req));
     }

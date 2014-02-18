@@ -394,7 +394,7 @@ private:
          * correspondingly.
          * @param thresh threshold
          */
-        void kick_pending(u16 thresh = 1);
+        void kick_pending(u16 thresh = 1, bool kick_now = false);
         void kick_pending_with_thresh() {
             kick_pending(_kick_thresh);
         }
@@ -404,7 +404,7 @@ private:
          *
          * @return TRUE if the vring has been actually indicated.
          */
-        bool kick_hw();
+        bool kick_hw(bool kick_now = false);
 
         /**
          * Inform the Txq that there is a new pending work

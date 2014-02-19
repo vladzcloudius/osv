@@ -274,8 +274,10 @@ namespace virtio {
             trace_virtio_kick(_q_index);
             _dev->kick(_q_index);
             _avail_added_since_kick = 0;
+            return true;
         }
-        return kicked;
+
+        return false;
     }
 
     void

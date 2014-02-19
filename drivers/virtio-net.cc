@@ -136,18 +136,18 @@ int net::xmit(struct mbuf* buff)
     return _txq.xmit(buff);
 }
 
-inline bool net::txq::kick_hw(bool kick_now)
+inline bool net::txq::kick_hw()
 {
-    return vqueue->kick(kick_now);
+    return vqueue->kick();
 }
 
-inline void net::txq::kick_pending(u16 thresh, bool kick_now)
+inline void net::txq::kick_pending(u16 thresh)
 {
     if (_pkts_to_kick >= thresh) {
         stats.tx_pkts_from_disp += _pkts_to_kick;
         _pkts_to_kick = 0;
         stats.tx_kicks++;
-        if (kick_hw(kick_now)) {
+        if (kick_hw()) {
             stats.tx_hv_kicks++;
         }
     }
@@ -200,10 +200,10 @@ void net::fill_qstats(const struct txq& txq,
                       struct if_data* out_data) const
 {
 #ifdef TX_DEBUG
-    printf("pkts(%d)/kicks(%d)=%f\n", txq.stats.tx_packets,
+    printf("pkts(%d)/hv_kicks(%d)=%f\n", txq.stats.tx_packets,
            txq.stats.tx_hv_kicks,
            (double)txq.stats.tx_packets/txq.stats.tx_hv_kicks);
-    printf("hv_kicks(%d)/hv_kicks(%d)=%f\n", txq.stats.tx_hv_kicks,
+    printf("hv_kicks(%d)/kicks(%d)=%f\n", txq.stats.tx_hv_kicks,
            txq.stats.tx_kicks,
            (double)txq.stats.tx_hv_kicks/txq.stats.tx_kicks);
     printf("disp_pkts(%d)/disp_wakeups(%d) = %f\n", txq.stats.tx_pkts_from_disp,
@@ -707,8 +707,8 @@ void net::txq::xmit_one_locked(void* _req)
 
     if (try_xmit_one_locked(req)) {
         do {
-            // We are going to poll - kick() the pending packets
-            kick_pending(1, true);
+            // We are going to poll - flush the pending packets
+            kick_pending();
             if (!vqueue->used_ring_not_empty()) {
                 do {
                     sched::thread::yield();

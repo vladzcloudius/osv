@@ -166,7 +166,7 @@ class virtio_driver;
         bool use_indirect(int desc_needed);
         void set_use_indirect(bool flag) { _use_indirect = flag;}
         bool get_use_indirect() { return _use_indirect;}
-        bool kick(bool kick_now = false);
+        bool kick();
         // Total number of descriptors in ring
         int size() {return _num;}
 

@@ -132,7 +132,6 @@ public:
     iterator begin() { return iterator(this); }
     bool push(value_type v) { return _r.push(v); }
     bool empty() const { return _r.empty(); }
-    unsigned size() const { return _r.size(); }
     void push_new_waiter(wait_record* wr) { _waitq.push(wr); }
 
 private:

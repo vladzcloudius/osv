@@ -296,9 +296,11 @@ public:
     // have to provide its own version.
     void huge_page(hw_ptep ptep, uintptr_t offset) { assert(0); }
     // if huge page range is covered by smaller pages some page table operations
-    // may want to have special handling for level 1 non leaf pte. intermediate_page_post()
-    // is called on such page after small_page() is called on all leaf pages in range
-    void intermediate_page_post(hw_ptep ptep, uintptr_t offset) { return; }
+    // may want to have special handling for level 1 non leaf pte. intermediate_page_pre()
+    // is called just before descending into the next level, while intermediate_page_post()
+    // is called just after.
+    void intermediate_page_pre(hw_ptep ptep, uintptr_t offset) {}
+    void intermediate_page_post(hw_ptep ptep, uintptr_t offset) {}
     // Page walker calls small_page() when it has 4K region of virtual memory to
     // deal with and huge_page() when it has 2M of virtual memory, but if it has
     // 2M pte less then 2M of virt memory to operate upon and split is disabled
@@ -390,6 +392,7 @@ private:
                 if (level) {
                     if (!skip_pte(ptep)) {
                         if (descend(ptep) || !page_mapper.huge_page(ptep, offset)) {
+                            page_mapper.intermediate_page_pre(ptep, offset);
                             map_range(vstart1, vend1 - vstart1 + 1, page_mapper, slop, ptep, base_virt);
                             page_mapper.intermediate_page_post(ptep, offset);
                         }
@@ -497,6 +500,41 @@ public:
     }
 };
 
+struct tlb_gather {
+    explicit tlb_gather(map_page_ops* ops) : ops(ops) {}
+    ~tlb_gather() { flush(); }
+    static constexpr size_t max_pages = 20;
+    struct tlb_page {
+        void* addr;
+        size_t size;
+        off_t offset; // FIXME: unneeded?
+    };
+    map_page_ops* ops;
+    size_t nr_pages = 0;
+    tlb_page pages[max_pages];
+    void push(void* addr, size_t size, off_t offset) {
+        if (nr_pages == max_pages) {
+            flush();
+        }
+        pages[nr_pages++] = { addr, size, offset };
+    }
+    void flush() {
+        if (!nr_pages) {
+            return;
+        }
+        tlb_flush();
+        for (auto i = 0u; i < nr_pages; ++i) {
+            auto&& tp = pages[i];
+            if (tp.size == page_size) {
+                ops->free(tp.addr, tp.offset);
+            } else {
+                ops->free(tp.addr, tp.size, tp.offset);
+            }
+        }
+        nr_pages = 0;
+    }
+};
+
 /*
  * Undo the operation of populate(), freeing memory allocated by populate()
  * and marking the pages non-present.
@@ -504,28 +542,22 @@ public:
 template <account_opt T = account_opt::no>
 class unpopulate : public vma_operation<allocate_intermediate_opt::no, skip_empty_opt::yes, T> {
 private:
-    struct page {
-        void *addr;
-        uintptr_t offset;
-    };
-    std::stack<page> small_pages;
-    std::stack<page> huge_pages;
-    map_page_ops* _pops;
+    tlb_gather _tlb_gather;
 public:
-    unpopulate(map_page_ops* pops) : _pops(pops) {}
+    unpopulate(map_page_ops* pops) : _tlb_gather(pops) {}
     void small_page(hw_ptep ptep, uintptr_t offset) {
         // Note: we free the page even if it is already marked "not present".
         // evacuate() makes sure we are only called for allocated pages, and
         // not-present may only mean mprotect(PROT_NONE).
         pt_element pte = ptep.read();
         ptep.write(make_empty_pte());
-        small_pages.push(page {phys_to_virt(pte.addr(false)), offset});
+        _tlb_gather.push(phys_to_virt(pte.addr(false)), page_size, offset);
         this->account(mmu::page_size);
     }
     bool huge_page(hw_ptep ptep, uintptr_t offset) {
         pt_element pte = ptep.read();
         ptep.write(make_empty_pte());
-        huge_pages.push(page {phys_to_virt(pte.addr(true)), offset});
+        _tlb_gather.push(phys_to_virt(pte.addr(true)), huge_page_size, offset);
         this->account(mmu::huge_page_size);
         return true;
     }
@@ -533,18 +565,9 @@ public:
         small_page(ptep, offset);
     }
     bool tlb_flush_needed(void) {
-        return !small_pages.empty() || !huge_pages.empty();
+        return false; // ~tlb_gather will take care of everything
     }
-    void finalize(void) {
-        while (!small_pages.empty()) {
-            _pops->free(small_pages.top().addr, small_pages.top().offset);
-            small_pages.pop();
-        }
-        while (!huge_pages.empty()) {
-            _pops->free(huge_pages.top().addr, huge_page_size, huge_pages.top().offset);
-            huge_pages.pop();
-        }
-    }
+    void finalize(void) {}
 };
 
 class protection : public vma_operation<allocate_intermediate_opt::no, skip_empty_opt::yes> {
@@ -639,6 +662,37 @@ public:
         huge_page(ptep, offset);
     }
 };
+
+class cleanup_intermediate_pages
+    : public page_table_operation<
+          allocate_intermediate_opt::no,
+          skip_empty_opt::yes,
+          descend_opt::yes,
+          once_opt::no,
+          split_opt::no> {
+public:
+    void small_page(hw_ptep ptep, uintptr_t offset) { ++live_ptes; }
+    bool huge_page(hw_ptep ptep, uintptr_t offset) { return true; }
+    void intermediate_page_pre(hw_ptep ptep, uintptr_t offset) {
+        live_ptes = 0;
+    }
+    void intermediate_page_post(hw_ptep ptep, uintptr_t offset) {
+        if (!live_ptes) {
+            auto old = ptep.read();
+            auto v = phys_cast<u64*>(old.addr(false));
+            for (unsigned i = 0; i < 512; ++i) {
+                assert(v[i] == 0);
+            }
+            ptep.write(make_empty_pte());
+            memory::free_page(phys_to_virt(old.addr(false)));
+        }
+    }
+    void sub_page(hw_ptep ptep, int level, uintptr_t offset) {}
+private:
+    unsigned live_ptes;
+};
+
+
 
 template<typename T> ulong operate_range(T mapper, void *vma_start, void *start, size_t size)
 {
@@ -900,6 +954,15 @@ void vdepopulate(void* addr, size_t size)
     }
 }
 
+void vcleanup(void* addr, size_t size)
+{
+    WITH_LOCK(vma_list_mutex) {
+        cleanup_intermediate_pages cleaner;
+        map_range(reinterpret_cast<uintptr_t>(addr), reinterpret_cast<uintptr_t>(addr), size,
+                cleaner, huge_page_size);
+    }
+}
+
 void* map_anon(void* addr, size_t size, unsigned flags, unsigned perm)
 {
     bool search = !(flags & mmap_fixed);
@@ -1009,7 +1072,7 @@ void vm_sigsegv(uintptr_t addr, exception_frame* ef)
 {
     auto pc = reinterpret_cast<void*>(ef->rip);
     if (pc >= text_start && pc < text_end) {
-        abort("page fault outside application");
+        abort("page fault outside application, addr %lx", addr);
     }
     osv::handle_segmentation_fault(addr, ef);
 }
@@ -1141,7 +1204,7 @@ static map_anon_page page_ops_init;
 static map_page_ops *page_ops_noinitp = &page_ops_noinit, *page_ops_initp = &page_ops_init;
 
 anon_vma::anon_vma(addr_range range, unsigned perm, unsigned flags)
-    : vma(range, perm, flags, true, (_flags & mmap_uninitialized) ? page_ops_noinitp : page_ops_initp)
+    : vma(range, perm, flags, true, (flags & mmap_uninitialized) ? page_ops_noinitp : page_ops_initp)
 {
 }
 

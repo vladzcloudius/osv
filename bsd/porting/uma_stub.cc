@@ -7,14 +7,14 @@
 
 #include <stdint.h>
 #include <assert.h>
-#include <bsd/machine/param.h>
+#include <machine/param.h>
 #include <bsd/porting/netport.h>
 #include <bsd/porting/uma_stub.h>
 #include <osv/preempt-lock.hh>
 
 void* uma_zone::cache::alloc()
 {
-    if (len) {
+    if (len && CONF_debug_memory) {
         return a[--len];
     }
     return nullptr;
@@ -22,7 +22,7 @@ void* uma_zone::cache::alloc()
 
 bool uma_zone::cache::free(void* obj)
 {
-    if (len < max_size) {
+    if (len < max_size && CONF_debug_memory) {
         a[len++] = obj;
         return true;
     }

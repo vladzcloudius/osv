@@ -17,12 +17,17 @@
 #include <osv/align.hh>
 #include <memory>
 #include <sstream>
+#include <cstring>
+#include <cpio.h>
+#include <iostream>
 
 using namespace std;
 
 namespace osv {
 
 namespace io = boost::iostreams;
+
+static const char* cpio_magic = "070701";
 
 struct cpio_newc_header {
     char c_magic[6];
@@ -66,6 +71,9 @@ bool cpio_in::parse_one(istream& is, cpio_in& out)
     } header;
     is.read(header.data, sizeof(header));
     auto& h = header.header;
+    if (strncmp(cpio_magic, h.c_magic, 6) != 0) {
+        throw runtime_error("bad cpio magic");
+    }
     auto namesize = convert(h.c_namesize);
     auto aligned = align_up(sizeof(header) + namesize, sizeof(uint32_t)) - sizeof(header);
     unique_ptr<char[]> namebuf{new char[aligned]};
@@ -74,14 +82,39 @@ bool cpio_in::parse_one(istream& is, cpio_in& out)
     if (name == "TRAILER!!!") {
         return false;
     }
+    auto mode = convert(h.c_mode);
     auto filesize = convert(h.c_filesize);
     auto aligned_filesize = align_up(filesize, 4u);
 
-    auto file_slice = io::restrict(is, 0, filesize);
-    io::stream<decltype(file_slice)> file(file_slice);
-    file.rdbuf()->pubsetbuf(nullptr, 0);
+    auto type = mode & 0170000;
+    switch (type) {
+    case C_ISREG: {
+        auto file_slice = io::restrict(is, 0, filesize);
+        io::stream<decltype(file_slice)> file(file_slice);
+        file.rdbuf()->pubsetbuf(nullptr, 0);
 
-    out.add_file(name, file);
+        out.add_file(name, file);
+        break;
+    }
+    case C_ISDIR: {
+        if (filesize > 0) {
+            throw runtime_error("bad directory size");
+        }
+        out.add_dir(name);
+        break;
+    }
+    case C_ISLNK: {
+        unique_ptr<char[]> targetbuf{new char[filesize]};
+        is.read(targetbuf.get(), filesize);
+        string target{targetbuf.get(), filesize};
+        out.add_symlink(name, target);
+	break;
+    }
+    default:
+        cout << name << ": unknown type " << type << "\n";
+        is.ignore(filesize);
+        break;
+    }
     is.ignore(aligned_filesize - filesize);
     return true;
 }

@@ -788,7 +788,7 @@ class osv_thread_apply_all(gdb.Command):
         exit_thread_context()
         state = vmstate()
         for t in state.thread_list:
-            gdb.write('thread %s\n\n' % t.address)
+            gdb.write('thread %s %s\n\n' % (t.address, t["_attr"]["_name"]["_M_elems"].string().strip('\0')))
             with thread_context(t, state):
                 gdb.execute(arg, from_tty)
             gdb.write('\n')
@@ -873,9 +873,12 @@ def all_traces():
 def save_traces_to_file(filename):
     trace.write_to_file(filename, list(all_traces()))
 
+def make_symbolic(addr):
+    return str(syminfo(addr))
+
 def dump_trace(out_func):
     indents = defaultdict(int)
-    bt_formatter = BacktraceFormatter(syminfo)
+    bt_formatter = BacktraceFormatter(make_symbolic)
 
     def lookup_tp(name):
         return gdb.lookup_global_symbol(name).value().dereference()

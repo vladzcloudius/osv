@@ -1,6 +1,6 @@
 #!/usr/bin/python2
 
-import os, sys, struct, optparse, StringIO, ConfigParser, subprocess, shutil, socket, time, threading
+import os, sys, struct, optparse, StringIO, ConfigParser, subprocess, shutil, socket, time, threading, stat
 
 defines = {}
 
@@ -73,10 +73,10 @@ def upload(osv, manifest, depends):
             s.sendall('\0'*(4-partial))
     def cpio_field(number, length):
         return "%.*x" % (length, number);
-    def cpio_header(filename, filesize):
+    def cpio_header(filename, mode, filesize):
         return ("070701"                          # magic
                 + cpio_field(0, 8)                # inode
-                + cpio_field(0, 8)                # mode
+                + cpio_field(mode, 8)             # mode
                 + cpio_field(0, 8)                # uid
                 + cpio_field(0, 8)                # gid
                 + cpio_field(0, 8)                # nlink
@@ -90,13 +90,29 @@ def upload(osv, manifest, depends):
                 + cpio_field(0, 8)                # check
                 + filename + '\0')
 
+    def strip_file(filename):
+        stripped_filename = filename
+        if(filename.endswith(".so") and \
+                (filename[0] != "/" or filename.startswith(os.getcwd()))):
+            stripped_filename = filename[:-3] + "-stripped.so"
+            if(not os.path.exists(stripped_filename) \
+                    or (os.path.getmtime(stripped_filename) < \
+                        os.path.getmtime(filename))):
+                subprocess.call(["strip", "-o", stripped_filename, filename])
+        return stripped_filename
+
+
     # Send the files to the guest
     for name, hostname in files:
         depends.write('\t%s \\\n' % (hostname,))
-        cpio_send(cpio_header(name, os.stat(hostname).st_size))
-        with open(hostname, 'r') as f:
-            cpio_send(f.read())
-    cpio_send(cpio_header("TRAILER!!!", 0))
+        hostname = strip_file(hostname)
+        if os.path.isdir(hostname) :
+            cpio_send(cpio_header(name, stat.S_IFDIR, 0))
+	else:
+            cpio_send(cpio_header(name, stat.S_IFREG, os.stat(hostname).st_size))
+            with open(hostname, 'r') as f:
+                cpio_send(f.read())
+    cpio_send(cpio_header("TRAILER!!!", 0, 0))
     s.shutdown(socket.SHUT_WR)
 
     # Wait for the guest to actually finish writing and syncing

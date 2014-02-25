@@ -28,13 +28,13 @@ First, install prerequisite packages:
 **Fedora**
 
 ```
-yum install ant autoconf automake boost-static gcc-c++ genromfs libvirt libtool flex bison qemu-system-x86 qemu-img maven
+yum install ant autoconf automake boost-static gcc-c++ genromfs libvirt libtool flex bison qemu-system-x86 qemu-img maven maven-shade-plugin
 ```
 
 **Debian**
 
 ```
-apt-get install build-essential libboost-all-dev genromfs autoconf libtool openjdk-7-jdk ant qemu-utils maven
+apt-get install build-essential libboost-all-dev genromfs autoconf libtool openjdk-7-jdk ant qemu-utils maven maven-shade-plugin
 ```
 
 **Ubuntu users**: you may use [Oracle JDK][] if you don't want to pull too many
@@ -42,9 +42,8 @@ dependencies for ``openjdk-7-jdk``
 
 [Oracle JDK]: https://launchpad.net/~webupd8team/+archive/java
 
-To ensure functional C++11 support, Gcc 4.7 or above is required.  Gcc 4.8 or
-above is recommended, as this was the first version to fully comply with the
-C++11 standard.
+To ensure functional C++11 support, Gcc 4.8 or above is required, as this was
+the first version to fully comply with the C++11 standard.
 
 Make sure all git submodules are up-to-date:
 
@@ -99,7 +98,7 @@ route add default gw 192.168.122.1
 Test networking:
 
 ```
-test TCPExternalCommunication
+test invoke TCPExternalCommunication
 ```
 
 Running Java or C applications that already reside within the image:

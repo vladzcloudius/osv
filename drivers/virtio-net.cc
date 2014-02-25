@@ -155,7 +155,7 @@ inline void net::txq::kick_pending(u16 thresh)
 
 inline void net::txq::wake_worker()
 {
-    dispatcher_task.wake();
+    worker.wake();
 }
 
 
@@ -235,7 +235,7 @@ net::net(pci::device& dev)
       _txq(this, get_virt_queue(1))
 {
     sched::thread* poll_task = &_rxq.poll_task;
-    sched::thread* tx_dispatcher_task = &_txq.dispatcher_task;
+    sched::thread* tx_worker_task = &_txq.worker;
 
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
@@ -299,8 +299,8 @@ net::net(pci::device& dev)
     //Start the polling thread before attaching it to the Rx interrupt
     poll_task->start();
 
-    /* TODO: What if_init() is for? */
-    tx_dispatcher_task->start();
+    // TODO: What if_init() is for?
+    tx_worker_task->start();
 
     ether_ifattach(_ifn, _config.mac);
 

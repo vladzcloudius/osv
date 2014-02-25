@@ -343,7 +343,7 @@ private:
         txq(net* parent, vring* vq) :
             vqueue(vq), _parent(parent), _xmit_it(this),
             _kick_thresh(vqueue->size()), _xmitter(this),
-            dispatcher_task([this] {
+            worker([this] {
                 // TODO: implement a proper StopPred when we fix a SP code
                 _xmitter.poll_until([] { return false; }, _xmit_it);
             })
@@ -478,7 +478,7 @@ private:
         osv::xmitter<txq, 4096> _xmitter;
 
     public:
-        sched::thread dispatcher_task; // TODO: Rename to "worker_task"
+        sched::thread worker;
     };
 
     /**

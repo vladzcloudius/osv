@@ -53,8 +53,16 @@ public:
         return true;
     }
 
+    /**
+     * Checks if the ring is empty(). May be called by both producer and the
+     * consumer.
+     *
+     * @return TRUE if there are no elements
+     */
     bool empty() const {
-        return size() == 0;
+        unsigned beg = _begin.load(std::memory_order_relaxed);
+        unsigned end = _end.load(std::memory_order_acquire);
+        return beg == end;
     }
 
     const T& front() const {
@@ -65,6 +73,12 @@ public:
         return _ring[beg & MaxSizeMask];
     }
 
+    /**
+     * Should be called by the producer. When called by the consumer may
+     * someties return a smaller value than the actual elements count.
+     *
+     * @return the current number of the elements.
+     */
     unsigned size() const {
         unsigned end = _end.load(std::memory_order_relaxed);
         unsigned beg = _begin.load(std::memory_order_relaxed);

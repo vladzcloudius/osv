@@ -20,7 +20,7 @@
 //
 // spsc ring of fixed size
 //
-template<class T, unsigned MaxSize>
+template<class T, unsigned MaxSize, unsigned MaxSizeMask = MaxSize - 1>
 class ring_spsc {
 public:
     ring_spsc(): _begin(0), _end(0) { assert(is_power_of_two(MaxSize)); }
@@ -33,7 +33,7 @@ public:
             return false;
         }
 
-        _ring[end & _max_size_mask] = element;
+        _ring[end & MaxSizeMask] = element;
         _end.store(end + 1, std::memory_order_release);
 
         return true;
@@ -47,7 +47,7 @@ public:
             return false;
         }
 
-        element = _ring[beg & _max_size_mask];
+        element = _ring[beg & MaxSizeMask];
         _begin.store(beg + 1, std::memory_order_relaxed);
 
         return true;
@@ -62,7 +62,7 @@ public:
 
         unsigned beg = _begin.load(std::memory_order_relaxed);
 
-        return _ring[beg & _max_size_mask];
+        return _ring[beg & MaxSizeMask];
     }
 
     unsigned size() const {
@@ -75,7 +75,6 @@ public:
 private:
     std::atomic<unsigned> _begin CACHELINE_ALIGNED;
     std::atomic<unsigned> _end CACHELINE_ALIGNED;
-    const unsigned _max_size_mask = MaxSize - 1;
     T _ring[MaxSize];
 };
 

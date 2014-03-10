@@ -6,6 +6,7 @@
  */
 
 #include <osv/sched.hh>
+#include <osv/elf.hh>
 #include <cstdlib>
 #include <cstring>
 #include <string.h>
@@ -52,6 +53,9 @@
 #include <api/sys/resource.h>
 #include <api/math.h>
 #include <osv/shutdown.hh>
+#include <osv/execinfo.hh>
+#include <osv/demangle.hh>
+#include <processor.hh>
 
 #define __LC_LAST 13
 
@@ -74,6 +78,33 @@ extern "C" {
 
 void *__dso_handle;
 
+static void print_backtrace(void)
+{
+    void *addrs[128];
+    int len;
+
+    debug_ll("\n[backtrace]\n");
+
+    len = backtrace_safe(addrs, 128);
+
+    /* Skip abort(const char *) and abort(void)  */
+    for (int i = 2; i < len; i++) {
+        auto ei = elf::get_program()->lookup_addr(addrs[i]);
+        const char *sname = ei.sym;
+        char demangled[1024];
+
+        if (!ei.sym)
+            sname = "???";
+        else if (demangle(ei.sym, demangled, sizeof(demangled)))
+            sname = demangled;
+
+        debug_ll("%p <%s+%d>\n",
+            addrs[i], sname,
+            reinterpret_cast<uintptr_t>(addrs[i])
+            - reinterpret_cast<uintptr_t>(ei.addr));
+    }
+}
+
 static bool already_aborted = false;
 void abort()
 {
@@ -83,6 +114,7 @@ void abort()
 void abort(const char *fmt, ...)
 {
     if (!already_aborted) {
+        processor::cli();
         already_aborted = true;
 
         static char msg[1024];
@@ -93,10 +125,18 @@ void abort(const char *fmt, ...)
         va_end(ap);
 
         debug_ll(msg);
+        print_backtrace();
         panic::pvpanic::panicked();
     }
     osv::halt();
 }
+
+// __assert_fail() is used by the assert() macros
+void __assert_fail(const char *expr, const char *file, int line, const char *func)
+{
+    abort("Assertion failed: %s (%s: %s: %d)\n", expr, file, func, line);
+}
+
 
 // __cxa_atexit and __cxa_finalize:
 // Gcc implements static constructors and destructors in shared-objects (DSO)

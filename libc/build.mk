@@ -53,8 +53,6 @@ libc += ctype/__ctype_b_loc.o
 
 libc += errno/strerror.o
 
-libc += exit/assert.o
-
 libc += locale/catclose.o
 libc += locale/catgets.o
 libc += locale/catopen.o
@@ -500,6 +498,7 @@ libc += stdio/wprintf.o
 libc += stdio/wscanf.o
 
 libc += stdlib/abs.o
+libc += stdlib/atof.o
 libc += stdlib/atoi.o
 libc += stdlib/atol.o
 libc += stdlib/atoll.o

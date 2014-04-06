@@ -34,7 +34,7 @@ yum install ant autoconf automake boost-static gcc-c++ genromfs libvirt libtool 
 **Debian**
 
 ```
-apt-get install build-essential libboost-all-dev genromfs autoconf libtool openjdk-7-jdk ant qemu-utils maven maven-shade-plugin
+apt-get install build-essential libboost-all-dev genromfs autoconf libtool openjdk-7-jdk ant qemu-utils maven libmaven-shade-plugin-java
 ```
 
 **Ubuntu users**: you may use [Oracle JDK][] if you don't want to pull too many
@@ -69,7 +69,7 @@ make img_format=raw
 ./scripts/run.py
 ```
 
-By default, this runs OSv under KVM, with 4 VCPUs and 1GB of memory,
+By default, this runs OSv under KVM, with 4 VCPUs and 2GB of memory,
 and runs the default management application (containing a shell, Web
 server, and SSH server).
 

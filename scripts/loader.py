@@ -574,7 +574,8 @@ class vmstate(object):
         self.cpu_list = cpu_list
 
     def load_thread_list(self):
-        self.thread_list = sorted(unordered_map(gdb.lookup_global_symbol('sched::thread_map').value()), key=lambda x: int(x["_id"]))
+        threads = map(gdb.Value.dereference, unordered_map(gdb.lookup_global_symbol('sched::thread_map').value()))
+        self.thread_list = sorted(threads, key=lambda x: int(x["_id"]))
 
     def cpu_from_thread(self, thread):
         stack = thread['_attr']['_stack']
@@ -1093,7 +1094,7 @@ def drivers():
 def show_virtio_driver(v):
     gdb.write('%s at %s\n' % (v.dereference().dynamic_type, v))
     vb = v.cast(virtio_driver_type.pointer())
-    for qidx in range(0, vb['_num_queues']):
+    for qidx in range(0, to_int(vb['_num_queues'])):
         q = vb['_queues'][qidx]
         gdb.write('  queue %d at %s\n' % (qidx, q))
         avail_guest_idx = q['_avail']['_idx']['_M_i']

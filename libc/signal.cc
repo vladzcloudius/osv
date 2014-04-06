@@ -135,6 +135,11 @@ int sigprocmask(int how, const sigset_t* _set, sigset_t* _oldset)
 
 int sigaction(int signum, const struct sigaction* act, struct sigaction* oldact)
 {
+    // FIXME: We do not support any sa_flags besides SA_SIGINFO.
+    if (signum < 0 || signum >= (int)nsignals) {
+        errno = EINVAL;
+        return -1;
+    }
     if (oldact) {
         *oldact = signal_actions[signum];
     }
@@ -146,21 +151,33 @@ int sigaction(int signum, const struct sigaction* act, struct sigaction* oldact)
 
 // using signal() is not recommended (use sigaction instead!), but some
 // programs like to call to do simple things, like ignoring a certain signal.
-sighandler_t signal(int signum, sighandler_t handler)
+static sighandler_t signal(int signum, sighandler_t handler, int sa_flags)
 {
-    if (signum < 0 || signum >= (int)nsignals) {
-        errno = EINVAL;
+    struct sigaction act;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = handler;
+    act.sa_flags = sa_flags;
+    struct sigaction old;
+    if (sigaction(signum, &act, &old) < 0) {
         return SIG_ERR;
     }
-    struct sigaction old = signal_actions[signum];
-    memset(&signal_actions[signum], 0, sizeof(signal_actions[signum]));
-    signal_actions[signum].sa_handler = handler;
     if (old.sa_flags & SA_SIGINFO) {
         // TODO: Is there anything sane to do here?
         return nullptr;
     } else {
         return old.sa_handler;
     }
+}
+
+sighandler_t signal(int signum, sighandler_t handler)
+{
+    return signal(signum, handler, SA_RESTART);
+}
+
+extern "C"
+sighandler_t __sysv_signal(int signum, sighandler_t handler)
+{
+    return signal(signum, handler, SA_RESETHAND | SA_NODEFER);
 }
 
 // using sigignore() and friends is not recommended as it is obsolete System V
@@ -223,12 +240,20 @@ int kill(pid_t pid, int sig)
         // very Unix-like behavior, but if we assume that the program doesn't
         // care which of its threads handle the signal - why not just create
         // a completely new thread and run it there...
-        const auto& sa = signal_actions[sig];
+        const auto sa = signal_actions[sig];
         auto t = new sched::thread([=] {
+            if (sa.sa_flags & SA_RESETHAND) {
+                signal_actions[sig].sa_flags = 0;
+                signal_actions[sig].sa_handler = SIG_DFL;
+            }
             if (sa.sa_flags & SA_SIGINFO) {
                 // FIXME: proper second (siginfo) and third (context) arguments (See example in call_signal_handler)
                 sa.sa_sigaction(sig, nullptr, nullptr);
             } else {
+                if (sa.sa_flags & SA_RESETHAND) {
+                    signal_actions[sig].sa_flags = 0;
+                    signal_actions[sig].sa_handler = SIG_DFL;
+                }
                 sa.sa_handler(sig);
             }
         }, sched::thread::attr().detached().stack(65536).name("signal_handler"));

@@ -5,6 +5,7 @@ import argparse
 import re
 import os
 import math
+import subprocess
 from itertools import ifilter
 from collections import defaultdict
 from operator import attrgetter
@@ -45,7 +46,7 @@ class src_addr_formatter:
         return text
 
 def add_trace_source_options(parser):
-    parser.add_argument("tracefile", help="Path to trace file")
+    parser.add_argument("tracefile", help="Path to trace file", nargs='?', default="tracefile")
 
 def get_trace_reader(args):
     return trace.read_file(args.tracefile)
@@ -118,11 +119,11 @@ def add_profile_options(parser):
     add_time_slicing_options(parser)
     group = parser.add_argument_group('profile options')
     group.add_argument("-r", "--caller-oriented", action='store_true', help="change orientation to caller-based; reverses order of frames")
-    group.add_argument("-g", "--group-by", choices=groupers.keys(), default='none', help="show one merged tree for all threads")
+    group.add_argument("-g", "--group-by", choices=groupers.keys(), default='none', help="group samples by given criteria")
     group.add_argument("--function", action='store', help="use given function as tree root")
     group.add_argument("--min-duration", action='store', help="show only nodes with resident time not shorter than this, eg: 200ms")
     group.add_argument("--min-hits", action='store',
-        help="show only nodes with hit count not smaller than this. can be absolute number or a percentage, eg. 10%")
+        help="show only nodes with hit count not smaller than this. can be absolute number or a percentage, eg. 10%%")
     group.add_argument("--max-levels", type=int, action='store', help="maximum number of tree levels to show")
 
 def get_wait_profile(traces):
@@ -217,7 +218,11 @@ def prof_wait(args):
     show_profile(args, get_wait_profile)
 
 def prof_hit(args):
-    show_profile(args, lambda traces: prof.get_hit_profile(traces, args.tracepoint))
+    if args.tracepoint:
+        filter = lambda trace: trace.name == args.tracepoint
+    else:
+        filter = None
+    show_profile(args, lambda traces: prof.get_hit_profile(traces, filter))
 
 def get_name_of_ended_func(name):
         m = re.match('(?P<func>.*)(_ret|_err)', name)
@@ -378,7 +383,7 @@ if __name__ == "__main__":
 
     cmd_list = subparsers.add_parser("list", help="list trace")
     add_trace_listing_options(cmd_list)
-    cmd_list.set_defaults(func=list_trace)
+    cmd_list.set_defaults(func=list_trace, paginate=True)
 
     cmd_list_timed = subparsers.add_parser("list-timed", help="list timed traces", description="""
         Prints block samples along with their duration in seconds with nanosecond precision. The duration
@@ -388,7 +393,7 @@ if __name__ == "__main__":
         """)
     add_trace_listing_options(cmd_list_timed)
     cmd_list_timed.add_argument("--sort", action="store", choices=['duration','time'], help="sort samples by given field")
-    cmd_list_timed.set_defaults(func=list_timed)
+    cmd_list_timed.set_defaults(func=list_timed, paginate=True)
 
     cmd_summary = subparsers.add_parser("summary", help="print trace summery", description="""
         Prints basic statistics about the trace.
@@ -406,7 +411,7 @@ if __name__ == "__main__":
     add_symbol_resolution_options(cmd_prof_wait)
     add_trace_source_options(cmd_prof_wait)
     add_profile_options(cmd_prof_wait)
-    cmd_prof_wait.set_defaults(func=prof_wait)
+    cmd_prof_wait.set_defaults(func=prof_wait, paginate=True)
 
     cmd_prof_hit = subparsers.add_parser("prof", help="show trace hit profile", description="""
         Prints profile showing number of times given tracepoint was reached.
@@ -415,8 +420,8 @@ if __name__ == "__main__":
     add_symbol_resolution_options(cmd_prof_hit)
     add_trace_source_options(cmd_prof_hit)
     add_profile_options(cmd_prof_hit)
-    cmd_prof_hit.add_argument("-t", "--tracepoint", action="store", required=True, help="name of the tracepint to count")
-    cmd_prof_hit.set_defaults(func=prof_hit)
+    cmd_prof_hit.add_argument("-t", "--tracepoint", action="store", help="name of the tracepoint to count")
+    cmd_prof_hit.set_defaults(func=prof_hit, paginate=True)
 
     cmd_extract = subparsers.add_parser("extract", help="extract trace from running instance", description="""
         Extracts trace from a running OSv instance via GDB.
@@ -427,6 +432,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if getattr(args, 'paginate', False):
+        less_process = subprocess.Popen(['less', '-FX'], stdin=subprocess.PIPE)
+        sys.stdout = less_process.stdin
+    else:
+        less_process = None
+
     try:
         args.func(args)
     except InvalidArgumentsException as e:
@@ -434,3 +445,7 @@ if __name__ == "__main__":
     except IOError as e:
         if e.errno != errno.EPIPE:
             raise
+    finally:
+        sys.stdout.close()
+        if less_process:
+            less_process.wait()

@@ -36,6 +36,8 @@ def format_args(args):
 
 def set_imgargs(options):
     execute = options.execute
+    if options.image and not execute:
+        return
     if (not execute):
         with open ("build/%s/cmdline" % (options.opt_path), "r") as cmdline:
             execute = cmdline.read()
@@ -51,6 +53,12 @@ def set_imgargs(options):
         debug_options = '-agentlib:jdwp=transport=dt_socket,server=y,suspend=%s,address=5005' % \
             ('n', 'y')[options.jvm_suspend]
         execute = execute.replace('java.so', 'java.so ' + debug_options)
+
+    if options.trace:
+        execute = '--trace=%s %s' % (options.trace, execute)
+
+    if options.trace_backtrace:
+        execute = '--trace-backtrace ' + execute
 
     cmdline = ["scripts/imgedit.py", "setargs", options.image_file, execute]
     if options.dry_run:
@@ -112,7 +120,11 @@ def start_osv_qemu(options):
     if (options.wait):
         args += ["-S"]
 
-    net_device_options = ['virtio-net-pci']
+    if (options.vmxnet3):
+        net_device_options = ['vmxnet3']
+    else:
+        net_device_options = ['virtio-net-pci']
+
     if options.mac:
         net_device_options.append('mac=%s' % options.mac)
 
@@ -126,7 +138,7 @@ def start_osv_qemu(options):
         args += ["-netdev", "user,id=un0,net=192.168.122.0/24,host=192.168.122.1"]
         net_device_options.append('netdev=un0')
         if options.api:
-            args += ["-redir", "tcp:8080::8080"]
+            args += ["-redir", "tcp:8000::8000"]
         args += ["-redir", "tcp:2222::22"]
 
         for rule in options.forward:
@@ -298,6 +310,8 @@ if (__name__ == "__main__"):
                         help="use AHCI instead of virtio-blk")
     parser.add_argument("-I", "--ide", action="store_true", default=False,
                         help="use ide instead of virtio-blk")
+    parser.add_argument("-3", "--vmxnet3", action="store_true", default=False,
+                        help="use vmxnet3 instead of virtio-net")
     parser.add_argument("-n", "--networking", action="store_true",
                         help="needs root. tap networking, specify interface")
     parser.add_argument("-b", "--bridge", action="store", default="virbr0",
@@ -337,9 +351,13 @@ if (__name__ == "__main__"):
     parser.add_argument("--vnc", action="store", default=":1",
                         help="specify vnc port number")
     parser.add_argument("--api", action = "store_true",
-                        help = "redirect the API port (8080) for user-mode networking")
+                        help = "redirect the API port (8000) for user-mode networking")
     parser.add_argument("--pass-args", action="append",
                         help = "pass arguments to underlying hypervisor (e.g. qemu)")
+    parser.add_argument("--trace", action="store",
+                        help="enable tracepoint")
+    parser.add_argument("--trace-backtrace", action="store_true",
+                        help="enable collecting of backtrace at tracepoints")
     cmdargs = parser.parse_args()
     cmdargs.opt_path = "debug" if cmdargs.debug else "release"
     cmdargs.image_file = os.path.abspath(cmdargs.image or "build/%s/usr.img" % cmdargs.opt_path)

@@ -12,7 +12,11 @@
 #include <osv/debug.hh>
 #include <osv/irqlock.hh>
 #include <osv/align.hh>
+
+#ifndef AARCH64_PORT_STUB
 #include <osv/interrupt.hh>
+#endif /* !AARCH64_PORT_STUB */
+
 #include "smp.hh"
 #include "osv/trace.hh"
 #include <osv/percpu.hh>
@@ -40,6 +44,7 @@ TRACEPOINT(trace_sched_migrate, "thread=%p cpu=%d", thread*, unsigned);
 TRACEPOINT(trace_sched_queue, "thread=%p", thread*);
 TRACEPOINT(trace_sched_preempt, "");
 TRACEPOINT(trace_timer_set, "timer=%p time=%d", timer_base*, s64);
+TRACEPOINT(trace_timer_reset, "timer=%p time=%d", timer_base*, s64);
 TRACEPOINT(trace_timer_cancel, "timer=%p", timer_base*);
 TRACEPOINT(trace_timer_fired, "timer=%p", timer_base*);
 TRACEPOINT(trace_thread_create, "thread=%p", thread*);
@@ -54,7 +59,9 @@ bool __thread need_reschedule = false;
 
 elf::tls_data tls;
 
+#ifndef AARCH64_PORT_STUB
 inter_processor_interrupt wakeup_ipi{[] {}};
+#endif /* !AARCH64_PORT_STUB */
 
 // "tau" controls the length of the history we consider for scheduling,
 // or more accurately the rate of decay of an exponential moving average.
@@ -194,6 +201,7 @@ void cpu::reschedule_from_interrupt(bool preempt)
         thread::current()->_fpu.save();
     }
 
+    assert(sched::exception_depth <= 1);
     need_reschedule = false;
     handle_incoming_wakeups();
 
@@ -314,10 +322,12 @@ void cpu::idle_poll_end()
 
 void cpu::send_wakeup_ipi()
 {
+#ifndef AARCH64_PORT_STUB
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!idle_poll.load(std::memory_order_relaxed)) {
         wakeup_ipi.send(this);
     }
+#endif /* !AARCH64_PORT_STUB */
 }
 
 void cpu::do_idle()
@@ -432,7 +442,7 @@ void cpu::load_balance()
         }
         WITH_LOCK(irq_lock) {
             auto i = std::find_if(runqueue.rbegin(), runqueue.rend(),
-                    [](thread& t) { return !t._attr._pinned_cpu; });
+                    [](thread& t) { return !t._attr._pinned_cpu && t._migration_lock_counter == 0; });
             if (i == runqueue.rend()) {
                 continue;
             }
@@ -576,6 +586,7 @@ thread::thread(std::function<void ()> func, attr attr, bool main)
     , _runtime(thread::priority_default)
     , _detached_state(new detached_state(this))
     , _attr(attr)
+    , _migration_lock_counter(0)
     , _id(0)
     , _cleanup([this] { delete this; })
     , _joiner(nullptr)
@@ -901,7 +912,7 @@ void thread::timer_fired()
     wake();
 }
 
-unsigned long thread::id()
+unsigned int thread::id()
 {
     return _id;
 }
@@ -1063,10 +1074,11 @@ void timer_base::expire()
 void timer_base::set(osv::clock::uptime::time_point time)
 {
     trace_timer_set(this, time.time_since_epoch().count());
-    _state = state::armed;
-    _time = time;
     irq_save_lock_type irq_lock;
     WITH_LOCK(irq_lock) {
+        _state = state::armed;
+        _time = time;
+
         auto& timers = cpu::current()->timers;
         timers._list.insert(*this);
         _t._active_timers.push_back(*this);
@@ -1093,6 +1105,31 @@ void timer_base::cancel()
     // even if we remove the first timer, allow it to expire rather than
     // reprogramming the timer
 }
+
+void timer_base::reset(osv::clock::uptime::time_point time)
+{
+    trace_timer_reset(this, time.time_since_epoch().count());
+
+    auto& timers = cpu::current()->timers;
+
+    irq_save_lock_type irq_lock;
+    WITH_LOCK(irq_lock) {
+        if (_state == state::armed) {
+            timers._list.erase(timers._list.iterator_to(*this));
+        } else {
+            _t._active_timers.push_back(*this);
+            _state = state::armed;
+        }
+
+        _time = time;
+
+        timers._list.insert(*this);
+
+        if (timers._list.iterator_to(*this) == timers._list.begin()) {
+            timers.rearm();
+        }
+    }
+};
 
 bool timer_base::expired() const
 {

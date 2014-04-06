@@ -80,7 +80,7 @@ int scsi::exec_cmd(struct bio *bio)
     auto &req_cmd = req->req.cmd;
     auto &resp_cmd = req->resp.cmd;
 
-    memcpy(req_cmd.cdb, req->cdb, 16);
+    memcpy(req_cmd.cdb, req->cdb, req->cdb_len);
 
     queue->init_sg();
     queue->add_out_sg(&req_cmd, sizeof(req_cmd));
@@ -124,7 +124,7 @@ void scsi::add_lun(u16 target, u16 lun)
     dev->max_io_size = _config.max_sectors * VIRTIO_SCSI_SECTOR_SIZE;
     read_partition_table(dev);
 
-    printf("virtio-scsi: Add scsi device target=%d, lun=%-3d as %s, devsize=%lld\n", target, lun, dev_name.c_str(), devsize);
+    debug("virtio-scsi: Add scsi device target=%d, lun=%-3d as %s, devsize=%lld\n", target, lun, dev_name.c_str(), devsize);
 }
 
 bool scsi::ack_irq()
@@ -205,8 +205,7 @@ void scsi::req_done()
             req->response = response;
             req->status = status;
 
-            // Other req type will be freed by the caller who send the bio
-            if (req->bio->bio_cmd != BIO_SCSI)
+            if (req->free_by_driver)
                 delete req;
 
             biodone(bio, response == VIRTIO_SCSI_S_OK);

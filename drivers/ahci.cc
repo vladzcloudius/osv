@@ -18,6 +18,7 @@ namespace ahci {
 int hba::_disk_idx = 0;
 
 struct hba_priv {
+    devop_strategy_t strategy;
     class hba *hba;
     class port *port;
 };
@@ -25,7 +26,6 @@ struct hba_priv {
 static void hba_strategy(struct bio *bio)
 {
     auto prv = hba::get_priv(bio);
-    bio->bio_offset += bio->bio_dev->offset;
     prv->port->make_request(bio);
 }
 
@@ -46,7 +46,7 @@ static struct devops hba_devops {
     hba_write,
     no_ioctl,
     no_devctl,
-    hba_strategy,
+    multiplex_strategy,
 };
 
 struct driver hba_driver = {
@@ -153,6 +153,13 @@ void port::setup()
     // Start Device
     cmd |= PORT_CMD_ST;
     port_writel(PORT_CMD, cmd);
+
+    // Register the per-port irq thread
+    std::string name("ahci-port");
+    name += std::to_string(_pnr);
+    _irq_thread = new sched::thread([this] { this->req_done(); },
+            sched::thread::attr().name(name));
+    _irq_thread->start();
 }
 
 void port::enable_irq()
@@ -173,10 +180,9 @@ void port::wait_device_ready()
     }
 }
 
-void port::wait_ci_ready()
+void port::wait_ci_ready(u8 slot)
 {
     // Wait for Command Issue Becoming Ready
-    u8 slot = 0;
     for (;;) {
         auto ci = port_readl(PORT_CI);
         if (!(ci & (1U << slot)))
@@ -193,6 +199,8 @@ int port::send_cmd(u8 slot, int iswrite, void *buffer, u32 bsize)
              (5U << 0)) |                //FIS Length 5 DWORDS, 20 Bytes
              (iswrite ? (1U << 6) : 0);
     mmu::phys base = mmu::virt_to_phys(&_cmd_table[slot]);
+    // cmd_table needs to be aligned on 128-bytes, indicated by bit 6-0 being zero.
+    assert((base & 0x7F) == 0);
     _cmd_list[slot].flags = flags;
     _cmd_list[slot].bytes = 0;
     _cmd_list[slot].base = base & 0xFFFFFFFF;
@@ -201,30 +209,30 @@ int port::send_cmd(u8 slot, int iswrite, void *buffer, u32 bsize)
     if (buffer) {
         // Setup Command Table
         mmu::phys buf = mmu::virt_to_phys(buffer);
+        // Data Base Address must be 2-bytes aligned, indicated by bit 0 being zero.
+        assert((buf & 0x01) == 0);
         _cmd_table[slot].prdt[0].base = buf & 0xFFFFFFFF;
         _cmd_table[slot].prdt[0].baseu = buf >> 32;
+        // Data Byte Count. Bit ‘0’ of this field must always be ‘1’ to indicate an even byte count.
+        assert(((bsize - 1) & 0x01) == 1);
         _cmd_table[slot].prdt[0].flags = bsize - 1;
     }
 
-    wait_device_ready();
-    wait_ci_ready();
-
-    port_writel(PORT_SACT, 1U << slot);
-    port_writel(PORT_CI, 1U << slot);
+    // Use _cmd_lock to close the following race:
+    // Cmd send             Cmd completion
+    // 1) set _cmd_active
+    //                      2) read PORT_CI for cmd completion
+    //                         done_mask would think this cmd was completed
+    // 3) set PORT_CI
+    WITH_LOCK(_cmd_lock) {
+        _cmd_active |= 1U << slot;
+        port_writel(PORT_CI, 1U << slot);
+    }
 
     return 0;
 }
 
-void port::wait_cmd_irq()
-{
-    _waiter.reset(*sched::thread::current());
-    sched::thread::wait_until([=] { return _cmd_send_nr <= get_cmd_done_nr(); });
-    wait_ci_ready();
-    _cmd_done_nr = _cmd_send_nr;
-    _waiter.clear();
-}
-
-void port::wait_cmd_poll()
+void port::wait_cmd_poll(u8 slot)
 {
     auto host_is = _hba->hba_readl(HOST_IS);
     for (;;) {
@@ -233,7 +241,7 @@ void port::wait_cmd_poll()
             port_writel(PORT_IS, is);
 
             wait_device_ready();
-            wait_ci_ready();
+            wait_ci_ready(slot);
 
            if (is & 0x02) {
                auto error  = _recv_fis->psfis[3];
@@ -249,6 +257,54 @@ void port::wait_cmd_poll()
         }
     }
     _hba->hba_writel(HOST_IS, host_is);
+
+    _cmd_active &= ~(1U << slot);
+}
+
+u32 port::done_mask()
+{
+    if (_cmd_active == 0x0)
+        return 0x0;
+
+    if (!used_slot())
+        return 0x0;
+
+    auto ci = port_readl(PORT_CI);
+
+    return _cmd_active & (~ci);
+}
+
+void port::req_done()
+{
+    while (1) {
+        u32 mask;
+
+        WITH_LOCK(_cmd_lock) {
+            sched::thread::wait_until(_cmd_lock, [&] { mask = this->done_mask(); return mask != 0x0; });
+        }
+
+        while (mask) {
+            u8 slot = ffs(mask) - 1;
+            assert(slot >= 0 && slot < 32);
+
+            struct bio *bio = _bios[slot].load(std::memory_order_relaxed);
+            _bios[slot] = nullptr;
+            assert(bio != nullptr);
+
+            biodone(bio, true);
+
+            mask &= ~(1U << slot);
+
+            // Mark the slot available
+            _cmd_active &= ~(1U << slot);
+
+            // Increase slot free number
+            _slot_free++;
+
+            // Wakeup the thread waiting for a free slot
+            _cmd_send_waiter.wake();
+        }
+    }
 }
 
 int port::make_request(struct bio* bio)
@@ -274,13 +330,24 @@ int port::make_request(struct bio* bio)
     }
 }
 
+void port::poll_mode_done(struct bio *bio, u8 slot)
+{
+    if (_hba->poll_mode()) {
+        wait_cmd_poll(slot);
+        biodone(bio, true);
+    }
+}
+
 void port::disk_rw(struct bio *bio, bool iswrite)
 {
     auto len = bio->bio_bcount;
     auto buf = bio->bio_data;
     u64 lba = bio->bio_offset / 512;
     u32 nr_sec = len / 512;
-    u8 command, slot = 0;
+    u8 command, slot;
+
+    slot = get_slot_wait();
+
     struct cmd_table &cmd = _cmd_table[slot];
 
     memset(&cmd.fis, 0, sizeof(cmd.fis));
@@ -299,21 +366,16 @@ void port::disk_rw(struct bio *bio, bool iswrite)
     cmd.fis.lba_ext_high = (lba >> 40) & 0xFF;
     cmd.fis.device = (1 << 6) | (1 << 4); // must have bit 6 set
 
+    _bios[slot] = bio;
     send_cmd(slot, iswrite, buf, len);
-    _cmd_send_nr++;
 
-    if (_hba->poll_mode()) {
-        wait_cmd_poll();
-    } else {
-        wait_cmd_irq();
-    }
-
-    biodone(bio, true);
+    poll_mode_done(bio, slot);
 }
 
 void port::disk_flush(struct bio *bio)
 {
-    u8 slot = 0;
+    auto slot = get_slot_wait();
+
     struct cmd_table &cmd = _cmd_table[slot];
 
     memset(&cmd.fis, 0, sizeof(cmd.fis));
@@ -321,16 +383,10 @@ void port::disk_flush(struct bio *bio)
     cmd.fis.flags = 1 << 7;
     cmd.fis.command = ATA_CMD_FLUSH_CACHE_EXT;
 
+    _bios[slot] = bio;
     send_cmd(slot, 0, nullptr, 0);
-    _cmd_send_nr++;
 
-    if (_hba->poll_mode()) {
-        wait_cmd_poll();
-    } else {
-        wait_cmd_irq();
-    }
-
-    biodone(bio, true);
+    poll_mode_done(bio, slot);
 }
 
 void port::disk_identify()
@@ -346,7 +402,7 @@ void port::disk_identify()
     cmd.fis.command = ATA_CMD_IDENTIFY_DEVICE;
 
     send_cmd(slot, 0, buffer, 512);
-    wait_cmd_poll();
+    wait_cmd_poll(slot);
 
     // Word 75 queue depth
     _queue_depth = buffer[75] & 0x1F;
@@ -363,6 +419,40 @@ void port::disk_identify()
     _devsize = sectors * 512;
 
     delete [] buffer;
+}
+
+bool port::used_slot()
+{
+    return _slot_free.load(std::memory_order_relaxed) != _slot_nr;
+}
+
+bool port::avail_slot()
+{
+    return _slot_free.load(std::memory_order_relaxed) >= 1;
+}
+
+bool port::get_slot(u8 &slot)
+{
+    if (!avail_slot()) {
+        return false;
+    }
+
+    _slot_free--;
+
+    slot = ffs(~_cmd_active) - 1;
+
+    return true;
+}
+
+u8 port::get_slot_wait()
+{
+    u8 slot;
+    while (!get_slot(slot)) {
+        _cmd_send_waiter.reset(*sched::thread::current());
+        sched::thread::wait_until([this] {return this->avail_slot();});
+        _cmd_send_waiter.clear();
+    }
+    return slot;
 }
 
 void hba::enable_irq()
@@ -462,12 +552,14 @@ void hba::scan()
         auto prv = static_cast<struct hba_priv*>(dev->private_data);
         prv->hba = this;
         prv->port = p;
+        prv->strategy = hba_strategy;
         dev->size = p->get_devsize();
+        dev->max_io_size = 4 * 1024 * 1024; // one PRDT entry contains 4MB at most
 
         add_port(pnr, p);
         read_partition_table(dev);
 
-        printf("AHCI: Add sata device port %d as %s, devsize=%lld\n", pnr, dev_name.c_str(), dev->size);
+        debug("AHCI: Add sata device port %d as %s, devsize=%lld\n", pnr, dev_name.c_str(), dev->size);
     }
 }
 
@@ -509,7 +601,6 @@ bool hba::ack_irq()
         return handled;
 
     auto host_is = hba_readl(HOST_IS);
-    //if (!(host_is & 1))
     if (!host_is)
         return handled;
 
@@ -523,7 +614,6 @@ bool hba::ack_irq()
         u8 error = port->recv_fis_error();
         assert (error == 0);
         if ((is & 1)) {
-            port->inc_cmd_done_nr();
             port->wakeup();
             handled = true;
         }

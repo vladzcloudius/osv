@@ -171,6 +171,7 @@ public:
     explicit timer_base(client& t);
     ~timer_base();
     void set(osv::clock::uptime::time_point time);
+    void reset(osv::clock::uptime::time_point time);
     // Set a timer using absolute wall-clock time.
     // CAVEAT EMPTOR: Internally timers are kept using the monotonic (uptime)
     // clock, so the wall-time given here is converted to an uptime.
@@ -409,7 +410,21 @@ public:
     void join();
     void detach();
     void set_cleanup(std::function<void ()> cleanup);
-    unsigned long id() __attribute__((no_instrument_function)); // guaranteed unique over system lifetime
+    /**
+     * Return thread's numeric id
+     *
+     * In OSv, threads are sched::thread objects and are usually referred to
+     * with a pointer, not a numeric id. Nevertheless, for Linux compatibility
+     * it is convenient for each thread to have a numeric id which emulates
+     * Linux's thread ids. The id() function returns this thread id.
+     *
+     * id() returns the same value for the life-time of the thread. A thread's
+     * id is guaranteed to be unique among currently running threads, but may
+     * not be unique for the lifetime of the system: Thread ids are assigned
+     * sequentially to new threads (skipping ids which are currently in use),
+     * and this sequential 32-bit counter can wrap around.
+     */
+    unsigned int id() __attribute__((no_instrument_function));
     void* get_tls(ulong module);
     void* setup_tls(ulong module, const void* tls_template,
             size_t init_size, size_t uninit_size);
@@ -529,6 +544,7 @@ private:
     };
     std::unique_ptr<detached_state> _detached_state;
     attr _attr;
+    int _migration_lock_counter;
     arch_thread _arch;
     arch_fpu _fpu;
     unsigned int _id;
@@ -545,6 +561,8 @@ private:
     friend class thread_runtime_compare;
     friend struct arch_cpu;
     friend class thread_runtime;
+    friend void migrate_enable();
+    friend void migrate_disable();
     friend void ::smp_main();
     friend void ::smp_launch();
     friend void init(std::function<void ()> cont);
@@ -1001,6 +1019,8 @@ void thread::wake_with_from_mutex(Action action)
 
 extern cpu __thread* current_cpu;
 
+extern __thread unsigned exception_depth;
+
 inline cpu* thread::tcpu() const
 {
     return _detached_state->_cpu;
@@ -1023,6 +1043,17 @@ timer::timer(thread& t)
 }
 
 extern std::vector<cpu*> cpus;
+
+inline void migrate_disable()
+{
+    thread::current()->_migration_lock_counter++;
+}
+
+inline void migrate_enable()
+{
+    thread::current()->_migration_lock_counter--;
+}
+
 
 }
 

@@ -33,7 +33,6 @@ extern "C" {
     void ex_br();
     void ex_ud();
     void ex_nm();
-    void ex_pf();
     void ex_df();
     void ex_ts();
     void ex_np();
@@ -264,7 +263,7 @@ void divide_error(exception_frame *ef)
 extern "C" void nmi(exception_frame* ef)
 {
     while (true) {
-        processor::halt_no_interrupts();
+        processor::cli_hlt();
     }
 }
 

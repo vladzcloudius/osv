@@ -22,6 +22,8 @@ mgmt = 1
 all: $(submake) $(modulemk)
 	$(call quiet, $(silentant) ant -Dmode=$(mode) -Dout=$(abspath $(out)/tests/bench) \
 		-e -f tests/bench/build.xml $(if $V,,-q), ANT tests/bench)
+	$(call quiet, $(silentant) ant -Dmode=$(mode) -Dout=$(abspath $(out)/tests/reclaim) \
+		-e -f tests/reclaim/build.xml $(if $V,,-q), ANT tests/reclaim)
 	$(MAKE) -r -C $(dir $(submake)) $@
 
 $(submake) $(modulemk): Makefile
@@ -41,6 +43,10 @@ check: export image ?= tests
 
 check: all
 	./scripts/test.py
+
+osv.vmdk osv.vdi: usr.img
+	$(MAKE) -r -C $(dir $(submake)) $@
+.PHONY: osv.vmdk osv.vdi
 
 # "tags" is the default output file of ctags, "TAGS" is that of etags
 tags TAGS:

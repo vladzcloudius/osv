@@ -126,6 +126,8 @@ int main(int argc, char **argv)
 	printf("f_files: %ld\n", st.f_files);
 	printf("f_ffree: %ld\n", st.f_ffree);
 	printf("f_namelen: %ld\n", st.f_namelen);
+	printf("f_fsid [0]: %ld\n", st.f_fsid.__val[0]);
+	printf("f_fsid [1]: %ld\n", st.f_fsid.__val[1]);
 
 	report((dir = opendir(TESTDIR)), "open testdir");
 
@@ -166,6 +168,9 @@ int main(int argc, char **argv)
 
 	printf("file size = %lld\n", s.st_size);
 
+	report((((dev_t) st.f_fsid.__val[1] << 32) | st.f_fsid.__val[0]) == s.st_dev,
+		"st_dev must be equals to f_fsid");
+
 	report(close(fd) == 0, "close fd");
 
 	fd = creat("/usr/foo", 0666);
@@ -187,8 +192,10 @@ int main(int argc, char **argv)
 		"rename /usr/testdir to /usr/testdir2");
 
 	report(rmdir("/usr/testdir2") == 0, "rmdir /usr/testdir2");
+#if 0
 #ifdef __OSV__
 	report(check_zfs_refcnt_behavior() == 0, "check zfs refcount consistency");
+#endif
 #endif
 
 #if 0

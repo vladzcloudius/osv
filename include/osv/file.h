@@ -46,7 +46,10 @@
 
 #include <memory>
 #include <vector>
+#include <osv/addr_range.hh>
 #include <osv/rcu.hh>
+#include <osv/error.h>
+#include "arch-mmu.hh"
 
 #endif
 
@@ -69,6 +72,9 @@ struct pollreq;
 
 #ifdef __cplusplus
 
+namespace mmu {
+class file_vma;
+};
 
 /*
  * File structure
@@ -88,6 +94,11 @@ struct file {
 	virtual int chmod(mode_t mode) = 0;
 	virtual void poll_install(pollreq& pr) {}
 	virtual void poll_uninstall(pollreq& pr) {}
+	virtual std::unique_ptr<mmu::file_vma> mmap(addr_range range, unsigned flags, unsigned perm, off_t offset) {
+	    throw make_error(ENODEV);
+	}
+	virtual mmu::mmupage get_page(uintptr_t offset, size_t size, mmu::hw_ptep ptep, bool write, bool shared) { throw make_error(ENOSYS); }
+	virtual void put_page(void *addr, uintptr_t offset, size_t size, mmu::hw_ptep ptep) { throw make_error(ENOSYS); }
 
 	int		f_flags;	/* open flags */
 	int		f_count;	/* reference count, see below */

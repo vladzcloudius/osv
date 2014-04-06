@@ -85,9 +85,9 @@ def strip_garbage(backtrace):
 
     return backtrace
 
-def get_hit_profile(traces, trace_name):
+def get_hit_profile(traces, filter=None):
     for trace in traces:
-        if trace.backtrace and trace.name == trace_name:
+        if trace.backtrace and (not filter or filter(trace)):
             yield ProfSample(trace.time, trace.cpu, trace.thread, trace.backtrace)
 
 def get_duration_profile(traces, entry_trace_name, exit_trace_name):
@@ -157,8 +157,11 @@ class GroupByCpu:
     def format(self, group):
         return 'CPU 0x%02x' % group
 
+def default_printer(args):
+    sys.stdout.write(args)
+
 def print_profile(samples, symbol_resolver, caller_oriented=False,
-        printer=sys.stdout.write, time_range=None, src_addr_formatter=debug.SourceAddress.__str__,
+        printer=default_printer, time_range=None, src_addr_formatter=debug.SourceAddress.__str__,
         node_filter=None, order=None, root_function=None, max_levels=None, grouping=None):
     groups = {}
 

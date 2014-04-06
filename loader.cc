@@ -5,7 +5,10 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
+#ifdef __x86_64__
 #include "drivers/isa-serial.hh"
+#endif /* __x86_64__ */
+
 #include "fs/fs.hh"
 #include <bsd/net.hh>
 #include <boost/format.hpp>
@@ -14,12 +17,14 @@
 #include <cctype>
 #include <osv/elf.hh>
 #include <osv/tls.hh>
-#include "exceptions.hh"
 #include <osv/debug.hh>
-#include "drivers/pci.hh"
-#include "smp.hh"
-#include "ioapic.hh"
 
+#include "smp.hh"
+
+#ifndef AARCH64_PORT_STUB
+#include "exceptions.hh"
+#include "drivers/pci.hh"
+#include "ioapic.hh"
 #include "drivers/acpi.hh"
 #include "drivers/driver.hh"
 #include "drivers/virtio-net.hh"
@@ -30,10 +35,12 @@
 #include "drivers/ahci.hh"
 #include "drivers/ide.hh"
 #include "drivers/vmw-pvscsi.hh"
+#include "drivers/vmxnet3.hh"
+#include "drivers/zfs.hh"
+#include "drivers/pvpanic.hh"
+#endif /* !AARCH64_PORT_STUB */
 
 #include <osv/sched.hh>
-#include "drivers/console.hh"
-#include "drivers/pvpanic.hh"
 #include <osv/barrier.hh>
 #include "arch.hh"
 #include "arch-setup.hh"
@@ -57,7 +64,13 @@ asm(".pushsection \".debug_gdb_scripts\", \"MS\",@progbits,1 \n"
     ".asciz \"scripts/loader.py\" \n"
     ".popsection \n");
 
-elf::Elf64_Ehdr* elf_header;
+#ifdef AARCH64_PORT_STUB
+#define ALIGN_ELF_HEADER_ADDR 4096
+#else
+#define ALIGN_ELF_HEADER_ADDR 8
+#endif
+elf::Elf64_Ehdr* elf_header __attribute__ ((aligned(ALIGN_ELF_HEADER_ADDR)));
+
 size_t elf_size;
 void* elf_start;
 elf::tls_data tls_data;
@@ -99,13 +112,27 @@ void premain()
 
 int main(int ac, char **av)
 {
-    printf("OSv " OSV_VERSION "\n");
+#ifdef AARCH64_PORT_STUB
+    printf("argc=%d\n", ac);
 
+    for (int i = 0; i < ac; i++) {
+        printf("argv[%d] = %s\n", i, av[i]);
+    }
+
+    printf("OSv AArch64: main reached, halting.\n");
+    while (1) {
+        asm ("wfi;");
+    }
+#endif /* AARCH64_PORT_STUB */
+
+#ifndef AARCH64_PORT_STUB
     smp_initial_find_current_cpu()->init_on_cpu();
     void main_cont(int ac, char** av);
     sched::init([=] { main_cont(ac, av); });
+#endif /* !AARCH64_PORT_STUB */
 }
 
+#ifndef AARCH64_PORT_STUB
 static bool opt_leak = false;
 static bool opt_noshutdown = false;
 static bool opt_log_backtrace = false;
@@ -303,6 +330,7 @@ void* do_main_thread(void *_commands)
     drvman->register_driver(xenfront::xenbus::probe);
     drvman->register_driver(ahci::hba::probe);
     drvman->register_driver(vmw::pvscsi::probe);
+    drvman->register_driver(vmw::vmxnet3::probe);
     drvman->register_driver(ide::ide_drive::probe);
     boot_time.event("drivers probe");
     drvman->load_all();
@@ -314,6 +342,7 @@ void* do_main_thread(void *_commands)
     if (opt_mount) {
         mount_zfs_rootfs();
         bsd_shrinker_init();
+        zfsdev::zfsdev_init();
     }
     boot_time.event("ZFS mounted");
 
@@ -383,6 +412,9 @@ void main_cont(int ac, char** av)
     memory::enable_debug_allocator();
     acpi::init();
     console::console_init(opt_vga);
+    // Print only after console is initialized.
+    printf("OSv " OSV_VERSION "\n");
+
     enable_trace();
     if (opt_log_backtrace) {
         // can only do this after smp_launch, otherwise the IDT is not initialized,
@@ -390,8 +422,6 @@ void main_cont(int ac, char** av)
         tracepoint_base::log_backtraces();
     }
     sched::init_detached_threads_reaper();
-    rcu_init();
-    boot_time.event("RCU initialized");
 
     vfs_init();
     boot_time.event("VFS initialized");
@@ -423,6 +453,8 @@ void main_cont(int ac, char** av)
         osv::shutdown();
     }
 }
+
+#endif /* !AARCH64_PORT_STUB */
 
 int __argc;
 char** __argv;

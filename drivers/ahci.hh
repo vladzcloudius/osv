@@ -158,6 +158,7 @@ struct cmd_table {
     u8 atapi_cmd[0x10];
     u8 reserved[0x30];
     struct prdt prdt[1]; // TODO: support more descriptors
+    u8 pad[256 - 144];   // cmd_table need to be aligned to 128 bytes
 } __attribute__((packed));
 
 // Command List Structure
@@ -241,18 +242,16 @@ public:
     void reset();
     void setup();
     int send_cmd(u8 slot, int iswrite, void *buffer, u32 bsize);
-    void wait_cmd_poll();
-    void wait_cmd_irq();
+    void wait_cmd_poll(u8 slot);
+    void wait_cmd_irq(u8 slot);
     void disk_identify();
     void disk_flush(struct bio *bio);
     void disk_rw(struct bio *bio, bool iswrite);
     int make_request(struct bio *bio);
     void enable_irq();
     void wait_device_ready();
-    void wait_ci_ready();
-    void wakeup() { _waiter.wake(); }
-    void inc_cmd_done_nr() { _cmd_done_nr++; }
-    u64 get_cmd_done_nr() { return _cmd_done_nr.load(std::memory_order_relaxed); }
+    void wait_ci_ready(u8 slot);
+    void wakeup() { _irq_thread->wake(); }
     bool linkup() { return _linkup; }
 
     u32 port2hba(u32 port_reg)
@@ -283,14 +282,21 @@ public:
         return error;
     }
 
+    void poll_mode_done(struct bio *bio, u8 slot);
+    u32 done_mask();
+    bool avail_slot();
+    bool used_slot();
+    bool get_slot(u8 &slot);
+    u8 get_slot_wait();
+    void req_done();
+
 private:
-    std::atomic<uint64_t> _cmd_done_nr{0};
-    sched::thread_handle _waiter;
-    u64 _cmd_send_nr = 0;
+    sched::thread_handle _cmd_send_waiter;
     bool _linkup = false;
     u8 _queue_depth;
     size_t _devsize;
     mutex _lock;
+    mutex _cmd_lock;
     u32 _pnr;
     hba *_hba;
 
@@ -301,6 +307,11 @@ private:
     mmu::phys _cmd_table_pa;
     mmu::phys _recv_fis_pa;
 
+    static constexpr u32 _slot_nr = 32;
+    std::atomic<struct bio *> _bios[_slot_nr];
+    std::atomic<u32> _slot_free{_slot_nr};
+    std::atomic<u32> _cmd_active{0};
+    sched::thread *_irq_thread;
 };
 
 }

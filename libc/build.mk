@@ -42,6 +42,9 @@ libc += ctype/wcswidth.o
 libc += ctype/wctrans.o
 libc += ctype/wcwidth.o
 
+libc += dirent/alphasort.o
+libc += dirent/scandir.o
+
 libc += env/__environ.o
 libc += env/clearenv.o
 libc += env/getenv.o
@@ -377,8 +380,8 @@ libc += network/if_indextoname.o
 libc += prng/rand.o
 libc += prng/random.o
 
-libc += setjmp/setjmp.o
-libc += setjmp/longjmp.o
+libc += arch/$(arch)/setjmp/setjmp.o
+libc += arch/$(arch)/setjmp/longjmp.o
 
 libc += signal/sigrtmax.o
 libc += signal/sigrtmin.o
@@ -641,3 +644,4 @@ libc += resource.o
 libc += mount.o
 libc += eventfd.o
 libc += timerfd.o
+libc += shm.o

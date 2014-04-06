@@ -978,6 +978,43 @@ xuio_stat_wbuf_nocopy()
 }
 
 #ifdef _KERNEL
+
+int
+dmu_map_uio(objset_t *os, uint64_t object, uio_t *uio, uint64_t size, unsigned action)
+{
+	dmu_buf_t **dbp;
+	int err;
+	struct iovec *iov;
+	int numbufs = 0;
+
+	// This will acquire a reference both in the dbuf, and in the ARC buffer.
+	// The ARC buffer reference will also update the access statistics
+	err = dmu_buf_hold_array(os, object, uio->uio_loffset, size, TRUE, FTAG,
+		&numbufs, &dbp);
+	if (err)
+		return (err);
+
+	assert(numbufs == 1);
+	dmu_buf_t *db = dbp[0];
+
+	dmu_buf_impl_t *dbi = (dmu_buf_impl_t *)db;
+	arc_buf_t *dbuf_abuf = dbi->db_buf;
+
+	iov = uio->uio_iov;
+	iov->iov_base = dbuf_abuf->b_data;
+	iov->iov_len = db->db_size;
+	uio->uio_loffset = uio->uio_loffset - db->db_offset;
+
+	if (action == ARC_ACTION_HOLD)
+		arc_share_buf(dbi->db_buf);
+	else if (action == ARC_ACTION_RELEASE)
+		arc_unshare_buf(dbi->db_buf);
+
+	dmu_buf_rele_array(dbp, numbufs, FTAG);
+
+	return (0);
+}
+
 int
 dmu_read_uio(objset_t *os, uint64_t object, uio_t *uio, uint64_t size)
 {

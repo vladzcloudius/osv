@@ -5,6 +5,7 @@
 /tools/netserver-osv: /home/vladz/Downloads/netperf-2.6.0/src/netserver
 /tools/netperf-osv: /home/vladz/Downloads/netperf-2.6.0/src/netperf
 /tools/netperf3-osv: /home/vladz/Downloads/netperf3/netperf3
+/etc/mnttab: /dev/null
 /dev: ../../static
 /proc: ../../static
 /tmp: ../../static

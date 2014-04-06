@@ -39,6 +39,7 @@ bool logger::parse_configuration(void)
     add_tag("virtio", logger_warn);
     add_tag("virtio-blk", logger_warn);
     add_tag("virtio-net", logger_warn);
+    add_tag("vmxnet3", logger_warn);
     add_tag("pci", logger_info);
     add_tag("poll", logger_info);
     add_tag("dhcp", logger_info);
@@ -202,18 +203,18 @@ void flush_debug_buffer()
 
 extern "C" {
 
-    void debugf(const char *msg, ...)
+    void debugf(const char *fmt, ...)
     {
-        char fmt[512];
+        char msg[512];
 
         va_list argptr;
-        va_start(argptr, msg);
-        vsnprintf(fmt, 512, msg, argptr);
+        va_start(argptr, fmt);
+        vsnprintf(msg, 512, fmt, argptr);
         va_end(argptr);
 
-        fill_debug_buffer(fmt, strlen(msg));
+        fill_debug_buffer(msg, strlen(msg));
         if (verbose) {
-            console::write(fmt, strlen(msg));
+            console::write(msg, strlen(msg));
         }
     }
 
@@ -247,4 +248,27 @@ extern "C" {
         console::write_ll(msg, strlen(msg));
     }
 
+    void debug_early(const char *msg)
+    {
+        console::write_ll(msg, strlen(msg));
+    }
+
+    void debug_early_u64(const char *msg, unsigned long long val)
+    {
+        char nr[16] = { 0 };
+
+        for (int i = 15; i >= 0; i--) {
+            unsigned char nibble = val & 0x0f;
+            if (nibble <= 9) {
+                nr[i] = nibble + '0';
+            } else {
+                nr[i] = nibble - 0x0a + 'a';
+            }
+            val >>= 4;
+        }
+
+        console::write_ll(msg, strlen(msg));
+        console::write_ll(nr, 16);
+        console::write_ll("\n", 1);
+    }
 }

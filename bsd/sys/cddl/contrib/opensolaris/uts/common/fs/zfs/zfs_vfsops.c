@@ -997,6 +997,9 @@ zfs_domount(vfs_t *vfsp, char *osname)
 	 */
 	fsid_guid = dmu_objset_fsid_guid(zfsvfs->z_os);
 	ASSERT((fsid_guid & ~((1ULL<<56)-1)) == 0);
+	vfsp->vfs_fsid.__val[0] = fsid_guid;
+	/* fsid type not included */
+	vfsp->vfs_fsid.__val[1] = fsid_guid >> 32;
 
 	/*
 	 * Set features for file system.
@@ -1469,6 +1472,8 @@ zfs_statfs(struct mount *mp, struct statfs *statp)
 	statp->f_files = statp->f_ffree + usedobjs;
 
 	statp->f_namelen = ZFS_MAXNAMELEN;
+
+	statp->f_fsid = mp->m_fsid; /* File system identifier */
 
 	ZFS_EXIT(zfsvfs);
 	return (0);

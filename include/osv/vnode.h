@@ -97,6 +97,7 @@ struct vattr {
 	nlink_t		va_nlink;
 	uid_t		va_uid;
 	gid_t		va_gid;
+	dev_t           va_fsid;        /* id of the underlying filesystem */
 	ino_t		va_nodeid;
 	struct timespec	va_atime;
 	struct timespec	va_mtime;
@@ -117,6 +118,12 @@ struct vattr {
 #define IO_APPEND	0x0001
 #define IO_SYNC		0x0002
 
+/*
+ * ARC actions
+ */
+#define ARC_ACTION_QUERY    0
+#define ARC_ACTION_HOLD     1
+#define ARC_ACTION_RELEASE  2
 
 typedef	int (*vnop_open_t)	(struct file *);
 typedef	int (*vnop_close_t)	(struct vnode *, struct file *);
@@ -138,6 +145,7 @@ typedef	int (*vnop_setattr_t)	(struct vnode *, struct vattr *);
 typedef	int (*vnop_inactive_t)	(struct vnode *);
 typedef	int (*vnop_truncate_t)	(struct vnode *, off_t);
 typedef	int (*vnop_link_t)      (struct vnode *, struct vnode *, char *);
+typedef int (*vnop_cache_t) (struct vnode *, struct file *, struct uio *, unsigned action);
 
 /*
  * vnode operations
@@ -162,6 +170,7 @@ struct vnops {
 	vnop_inactive_t		vop_inactive;
 	vnop_truncate_t		vop_truncate;
 	vnop_link_t		vop_link;
+	vnop_cache_t      vop_cache;
 };
 
 /*
@@ -170,6 +179,7 @@ struct vnops {
 #define VOP_OPEN(VP, FP)	   ((VP)->v_op->vop_open)(FP)
 #define VOP_CLOSE(VP, FP)	   ((VP)->v_op->vop_close)(VP, FP)
 #define VOP_READ(VP, FP, U, F)	   ((VP)->v_op->vop_read)(VP, FP, U, F)
+#define VOP_CACHE(VP, FP, U, A)	   ((VP)->v_op->vop_cache)(VP, FP, U, A)
 #define VOP_WRITE(VP, U, F)	   ((VP)->v_op->vop_write)(VP, U, F)
 #define VOP_SEEK(VP, FP, OLD, NEW) ((VP)->v_op->vop_seek)(VP, FP, OLD, NEW)
 #define VOP_IOCTL(VP, FP, C, A)	   ((VP)->v_op->vop_ioctl)(VP, FP, C, A)

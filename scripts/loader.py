@@ -10,7 +10,6 @@ import itertools
 import operator
 from glob import glob
 from collections import defaultdict
-from itertools import ifilter
 
 arch = 'x64'
 build_dir = os.path.dirname(gdb.current_objfile().filename)
@@ -35,7 +34,12 @@ def pt_index(addr, level):
     return (addr >> (12 + 9 * level)) & 511
 
 def phys_cast(addr, type):
-    return gdb.Value(addr + phys_mem).cast(type.pointer())
+    return gdb.parse_and_eval('0x%x' % (addr + phys_mem)).cast(type.pointer())
+
+def values(_dict):
+    if hasattr(_dict, 'viewvalues'):
+        return _dict.viewvalues()
+    return _dict.values()
 
 def read_vector(v):
     impl = v['_M_impl']
@@ -154,7 +158,7 @@ def free_page_ranges(node = None):
         p = fpr['tree_']['data_']['node_plus_pred_']
         node = p['header_plus_size_']['header_']['parent_']
     
-    if (long(node) != 0):
+    if node:
         page_range = node.cast(gdb.lookup_type('void').pointer()) - 8
         page_range = page_range.cast(gdb.lookup_type('memory::page_range').pointer())
         
@@ -172,7 +176,7 @@ def vma_list(node = None):
         p = fpr['tree_']['data_']['node_plus_pred_']
         node = p['header_plus_size_']['header_']['parent_']
 
-    if (long(node) != 0):
+    if node:
         offset = gdb.parse_and_eval("(int)&(('mmu::vma'*)0)->_vma_list_hook");
         vma = node.cast(gdb.lookup_type('void').pointer()) - offset
         vma = vma.cast(gdb.lookup_type('mmu::vma').pointer())
@@ -196,7 +200,7 @@ class osv_heap(gdb.Command):
                              gdb.COMMAND_USER, gdb.COMPLETE_NONE)
     def invoke(self, arg, from_tty):
         for page_range in free_page_ranges():
-            print '%s 0x%016x' % (page_range, page_range['size'])
+            print('%s 0x%016x' % (page_range, page_range['size']))
 
 class osv_memory(gdb.Command):
     def __init__(self):
@@ -222,11 +226,25 @@ class osv_memory(gdb.Command):
         print ("Free Memory:  %d Bytes (%.2f%%)" % 
                (freemem, (freemem*100.0/memsize)))
 
+class osv_waiters(gdb.Command):
+    def __init__(self):
+        gdb.Command.__init__(self, 'osv waiters',
+                             gdb.COMMAND_USER, gdb.COMPLETE_NONE)
+    def invoke(self, arg, from_tty):
+        reclaimer = gdb.lookup_global_symbol("memory::reclaimer_thread")
+        waiters = reclaimer.value()["_oom_blocked"]["_waiters"]
+        waiters_list = intrusive_list(waiters)
+        gdb.write('waiters:\n')
+        for w in waiters_list:
+            t = w["owner"].dereference().cast(thread_type)["_id"]
+            print(t)
+            gdb.write("Thread %d waits for %d Bytes\n" % (t, int(w["bytes"])))
+
 #
 # Returns a u64 value from a stats given a field name.
 #
 def get_stat_by_name(stats, stats_cast, field):
-    return long(gdb.parse_and_eval('('+str(stats_cast)+' '+str(stats)+')->'+str(field)+'.value.ui64'))
+    return int(gdb.parse_and_eval('('+str(stats_cast)+' '+str(stats)+')->'+str(field)+'.value.ui64'))
 
 class osv_zfs(gdb.Command):
     def __init__(self):
@@ -269,7 +287,7 @@ class osv_zfs(gdb.Command):
             print ("\tvdev_cache_bshift: %d" % vdev_cache_bshift)
 
             # Get address of 'struct vdc_stats vdc_stats'
-            vdc_stats_struct = long(gdb.parse_and_eval('(u64) &vdc_stats'))
+            vdc_stats_struct = int(gdb.parse_and_eval('(u64) &vdc_stats'))
             vdc_stats_cast = '(struct vdc_stats *)'
 
             vdev_delegations = get_stat_by_name(vdc_stats_struct, vdc_stats_cast, 'vdc_stat_delegations')
@@ -281,7 +299,7 @@ class osv_zfs(gdb.Command):
             print ("\t\tvdev_cache_misses:       %d" % vdev_misses)
 
         # Get address of 'struct arc_stats arc_stats'
-        arc_stats_struct = long(gdb.parse_and_eval('(u64) &arc_stats'))
+        arc_stats_struct = int(gdb.parse_and_eval('(u64) &arc_stats'))
         arc_stats_cast = '(struct arc_stats *)'
 
         arc_size = get_stat_by_name(arc_stats_struct, arc_stats_cast, 'arcstat_size')
@@ -390,7 +408,7 @@ def permstr(perm):
     return bits2str(perm, ['r', 'w', 'x'])
 
 def flagstr(flags):
-    return bits2str(flags, ['f', 'p', 's', 'u', 'j'])
+    return bits2str(flags, ['f', 'p', 's', 'u', 'j', 'm', 'b'])
 
 class osv_mmap(gdb.Command):
     def __init__(self):
@@ -403,7 +421,7 @@ class osv_mmap(gdb.Command):
             flags =  flagstr(ulong(vma['_flags']))
             perm =  permstr(ulong(vma['_perm']))
             size  = '{:<16}'.format('[%s kB]' % (ulong(end - start)/1024))
-            print '0x%016x 0x%016x %s flags=%s perm=%s' % (start, end, size, flags, perm)
+            print('0x%016x 0x%016x %s flags=%s perm=%s' % (start, end, size, flags, perm))
     
 ulong_type = gdb.lookup_type('unsigned long')
 timer_type = gdb.lookup_type('sched::timer_base')
@@ -414,10 +432,16 @@ active_thread_context = None
 def ulong(x):
     if isinstance(x, gdb.Value):
         x = x.cast(ulong_type)
-    x = long(x)
+    x = int(x)
     if x < 0:
-        x += 1L << 64
+        x += 1 << 64
     return x
+
+def to_int(gdb_value):
+    if hasattr(globals()['__builtins__'], 'long'):
+        # For GDB with python2
+        return long(gdb_value)
+    return int(gdb_value)
 
 class osv_syms(gdb.Command):
     def __init__(self):
@@ -427,15 +451,15 @@ class osv_syms(gdb.Command):
         syminfo.clear_cache()
         p = gdb.lookup_global_symbol('elf::program::s_objs').value()
         p = p.dereference().address
-        while long(p.dereference()):
+        while p.dereference():
             obj = p.dereference().dereference()
-            base = long(obj['_base'])
+            base = to_int(obj['_base'])
             obj_path = obj['_pathname']['_M_dataplus']['_M_p'].string()
             path = translate(obj_path)
             if not path:
-                print 'ERROR: Unable to locate object file for:', obj_path, hex(base)
+                print('ERROR: Unable to locate object file for:', obj_path, hex(base))
             else:
-                print path, hex(base)
+                print(path, hex(base))
                 load_elf(path, base)
             p += 1
 
@@ -556,7 +580,7 @@ class vmstate(object):
         stack = thread['_attr']['_stack']
         stack_begin = ulong(stack['begin'])
         stack_size = ulong(stack['size'])
-        for c in self.cpu_list.viewvalues():
+        for c in values(self.cpu_list):
             if c.rsp > stack_begin and c.rsp <= stack_begin + stack_size:
                 return c
         return None
@@ -607,7 +631,7 @@ def show_thread_timers(t):
         gdb.write('  timers:')
         for timer in timer_list:
             expired = '*' if timer['_state'] == timer_state_expired else ''
-            expiration = long(timer['_time']['__d']['__r']) / 1.0e9
+            expiration = int(timer['_time']['__d']['__r']) / 1.0e9
             gdb.write(' %11.9f%s' % (expiration, expired))
         gdb.write('\n')
 
@@ -674,6 +698,7 @@ class osv_info_threads(gdb.Command):
         gdb.Command.__init__(self, 'osv info threads',
                              gdb.COMMAND_USER, gdb.COMPLETE_NONE)
     def invoke(self, arg, for_tty):
+        thread_nr = 0
         exit_thread_context()
         state = vmstate()
         for t in state.thread_list:
@@ -719,6 +744,8 @@ class osv_info_threads(gdb.Command):
                     gdb.write("\tjoining on %s\n" % fr.frame.read_var("this"))
 
                 show_thread_timers(t)
+                thread_nr += 1
+        gdb.write('Number of threads: %d\n' % thread_nr)
 
 class osv_info_callouts(gdb.Command):
     def __init__(self):
@@ -764,13 +791,13 @@ class osv_thread(gdb.Command):
         state = vmstate()
         thread = None
         for t in state.thread_list:
-            if t.address.cast(ulong_type) == long(arg, 0):
+            if ulong(t.address) == int(arg, 0):
                 thread = t
             with thread_context(t, state):
-                if t['_id'] == long(arg, 0):
+                if to_int(t['_id']) == int(arg, 0):
                     thread = t
         if not thread:
-            print 'Not found'
+            print('Not found')
             return
         active_thread_context = thread_context(thread, state)
         active_thread_context.__enter__()
@@ -804,7 +831,7 @@ def setup_libstdcxx():
                  glob(gcc + '/usr/share/gcc-*/python')[0],
                  ]
     main = glob(gcc + '/usr/share/gdb/auto-load/usr/lib64/libstdc++.so.*.py')[0]
-    execfile(main)
+    exec(compile(open(main).read(), main, 'exec'))
 
 def sig_to_string(sig):
     '''Convert a tracepoing signature encoded in a u64 to a string'''
@@ -821,6 +848,28 @@ def align_down(v, pagesize):
 def align_up(v, pagesize):
     return align_down(v + pagesize - 1, pagesize)
 
+class concat(object):
+    def __init__(self, view1, view2):
+        self.view1 = view1
+        self.view2 = view2
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            l  = len(self.view1)
+            if index.start >= l:
+                return self.view2.__getitem__(slice(index.start - l, index.stop - l, index.step))
+            if index.stop >= l:
+                return self.view1.__getitem__(slice(index.start, l, index.step)) + \
+                    self.view2.__getitem__(slice(0, index.stop - l, index.step))
+            return self.view1.__getitem__(index)
+
+        if index < len(self.view1):
+            return self.view1[index]
+        return self.view2[index - len(self.view1)]
+
+    def __len__(self):
+        return len(self.view1) + len(self.view2)
+
 def all_traces():
     # XXX: needed for GDB to see 'trace_page_size'
     gdb.lookup_global_symbol('gdb_trace_function_entry')
@@ -835,7 +884,7 @@ def all_traces():
     last = ulong(gdb.lookup_global_symbol('trace_record_last').value()['_M_i'])
     last %= max_trace
     pivot = align_up(last, trace_page_size)
-    trace_log = trace_log[pivot:] + trace_log[:pivot]
+    trace_log = concat(trace_log[pivot:], trace_log[:pivot])
     last += max_trace - pivot
 
     tp_ptr = gdb.lookup_type('tracepoint_base').pointer()
@@ -844,11 +893,16 @@ def all_traces():
 
     i = 0
     while i < last:
-        tp_key, thread, thread_name, time, cpu, flags = struct.unpack('QQ16sQII', trace_log[i:i+48])
-        thread_name = thread_name.rstrip('\0')
+        tp_key, = struct.unpack('Q', trace_log[i:i+8])
         if tp_key == 0:
             i = align_up(i + 8, trace_page_size)
             continue
+
+        i += 8
+
+        thread, thread_name, time, cpu, flags = struct.unpack('Q16sQII', trace_log[i:i+40])
+        thread_name = thread_name.partition(b'\0')[0].decode()
+        i += 40
 
         tp = tracepoints.get(tp_key, None)
         if not tp:
@@ -856,8 +910,6 @@ def all_traces():
             tp = TracePoint(tp_key, str(tp_ref["name"].string()),
                 sig_to_string(ulong(tp_ref['sig'])), str(tp_ref["format"].string()))
             tracepoints[tp_key] = tp
-
-        i += 48
 
         backtrace = None
         if flags & 1:
@@ -894,7 +946,7 @@ def dump_trace(out_func):
         def trace_function(indent, annotation, data):
             fn, caller = data
             try:
-                block = gdb.block_for_pc(long(fn))
+                block = gdb.block_for_pc(to_int(fn))
                 fn_name = block.function.print_name
             except:
                 fn_name = '???'
@@ -1141,7 +1193,7 @@ def runqueue(cpuid, node = None):
         p = rq['data_']['node_plus_pred_']
         node = p['header_plus_size_']['header_']['parent_']
 
-    if (long(node) != 0):
+    if node:
         offset = gdb.parse_and_eval('(int)&((sched::thread *)0)->_runqueue_link');
         thread = node.cast(gdb.lookup_type('void').pointer()) - offset
         thread = thread.cast(gdb.lookup_type('sched::thread').pointer())
@@ -1160,10 +1212,10 @@ class osv_runqueue(gdb.Command):
                              gdb.COMMAND_USER, gdb.COMPLETE_NONE)
     def invoke(self, arg, from_tty):
         ncpus = gdb.parse_and_eval('sched::cpus._M_impl._M_finish - sched::cpus._M_impl._M_start');
-        for cpu in xrange(ncpus) :
+        for cpu in range(ncpus) :
             gdb.write("CPU %d:\n" % cpu)
             for thread in runqueue(cpu):
-                print '%d 0x%x %g' % (thread['_id'], ulong(thread), thread['_runtime']['_Rtt'])
+                print('%d 0x%x %g' % (thread['_id'], ulong(thread), thread['_runtime']['_Rtt']))
 
 class osv_info_virtio(gdb.Command):
     def __init__(self):
@@ -1177,6 +1229,7 @@ class osv_info_virtio(gdb.Command):
 osv()
 osv_heap()
 osv_memory()
+osv_waiters()
 osv_mmap()
 osv_zfs()
 osv_syms()

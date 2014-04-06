@@ -12,6 +12,9 @@
 #include <osv/poll.h>
 #include <fs/vfs/vfs.h>
 #include <osv/vfs_file.hh>
+#include <osv/mmu.hh>
+#include "arch-mmu.hh"
+#include <osv/pagecache.hh>
 
 vfs_file::vfs_file(unsigned flags)
 	: file(flags, DTYPE_VNODE)
@@ -134,4 +137,55 @@ int vfs_file::chmod(mode_t mode)
 {
 	// somehow this is handled outside file ops
 	abort();
+}
+
+mmu::mmupage vfs_file::get_page(uintptr_t off, size_t size, mmu::hw_ptep ptep, bool write, bool shared)
+{
+    return pagecache::get(this, off, ptep, write, shared);
+}
+
+void vfs_file::put_page(void *addr, uintptr_t off, size_t size, mmu::hw_ptep ptep)
+{
+    pagecache::release(this, addr, off, ptep);
+}
+
+// Locking: vn_lock will call into the filesystem, and that can trigger an
+// eviction that will hold the mmu-side lock that protects the mappings
+// Always follow that order. We however can't just get rid of the mmu-side lock,
+// because not all invalidations will be synchronous.
+void vfs_file::get_arcbuf(uintptr_t offset, unsigned action, void** start, size_t* len, void** page)
+{
+    struct vnode *vp = f_dentry->d_vnode;
+
+    iovec io;
+    io.iov_base = nullptr;
+    io.iov_len = 0;
+
+    uio data;
+    data.uio_iov = &io;
+    data.uio_iovcnt = 1;
+    data.uio_offset = off_t(offset);
+    data.uio_resid = mmu::page_size;
+    data.uio_rw = UIO_READ;
+
+    vn_lock(vp);
+    assert(VOP_CACHE(vp, this, &data, action) == 0);
+    vn_unlock(vp);
+    *start = io.iov_base;
+    *len = io.iov_len;
+    *page = static_cast<char*>(io.iov_base) + data.uio_offset;
+}
+
+std::unique_ptr<mmu::file_vma> vfs_file::mmap(addr_range range, unsigned flags, unsigned perm, off_t offset)
+{
+#ifdef AARCH64_PORT_STUB
+	abort();
+#else /* !AARCH64_PORT_STUB */
+	auto fp = this;
+	struct vnode *vp = fp->f_dentry->d_vnode;
+	if (!vp->v_op->vop_cache || (vp->v_size < (off_t)mmu::page_size)) {
+		return mmu::default_file_mmap(this, range, flags, perm, offset);
+	}
+	return mmu::map_file_mmap(this, range, flags, perm, offset);
+#endif /* !AARCH64_PORT_STUB */
 }

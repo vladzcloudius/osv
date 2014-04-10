@@ -369,8 +369,8 @@ private:
         }
 
         //
-        // Save the IPI sending (when dispatcher sleeps for an interrupt) and
-        // exchange in the wake_impl() by paying a price of an exchange
+        // Try to save the IPI sending (when dispatcher sleeps for an interrupt)
+        // and exchange in the wake_impl() by paying a price of an exchange
         // operation here.
         //
         if (!test_and_set_pending()) {

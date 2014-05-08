@@ -15,9 +15,7 @@
 #include <string.h>
 #include <list>
 
-#ifndef AARCH64_PORT_STUB
 #include <osv/mmu.hh>
-#endif /* !AARCH64_PORT_STUB */
 
 #include <osv/debug.hh>
 #include <osv/prio.hh>
@@ -28,6 +26,7 @@
 #include <osv/lazy_indirect.hh>
 
 #include <api/time.h>
+#include <osv/spinlock.h>
 
 namespace pthread_private {
 
@@ -180,9 +179,25 @@ int pthread_key_create(pthread_key_t* key, void (*dtor)(void*))
     return 0;
 }
 
-extern "C"
-int __pthread_key_create(pthread_key_t* key, void (*dtor)(void*))
-    __attribute__((alias("pthread_key_create")));
+int pthread_atfork(void (*prepare)(void), void (*parent)(void),
+                   void (*child)(void))
+{
+    return 0;
+}
+
+extern "C" int register_atfork(void (*prepare)(void), void (*parent)(void),
+                                void (*child)(void), void *__dso_handle)
+{
+    return 0;
+}
+
+extern "C" {
+    int __register_atfork(void (*prepare)(void), void (*parent)(void),
+                          void (*child)(void), void *__dso_handle) __attribute__((alias("register_atfork")));
+    int __pthread_key_create(pthread_key_t* key, void (*dtor)(void*))
+        __attribute__((alias("pthread_key_create")));
+}
+
 
 int pthread_key_delete(pthread_key_t key)
 {
@@ -213,6 +228,44 @@ int pthread_getcpuclockid(pthread_t thread, clockid_t *clock_id)
         auto id = p->_thread.id();
         *clock_id = id + _OSV_CLOCK_SLOTS;
     }
+    return 0;
+}
+
+// pthread_spinlock_t and spinlock_t aren't really the same type. But since
+// spinlock_t is a boolean and pthread_spinlock_t is defined to be an integer,
+// just casting it like this is fine. As long as we are never operating more
+// than sizeof(int) at a time, we should be fine.
+int pthread_spin_init(pthread_spinlock_t *lock, int pshared)
+{
+    static_assert(sizeof(spinlock_t) <= sizeof(pthread_spinlock_t),
+                  "OSv spinlock type doesn't match pthread's");
+    // PTHREAD_PROCESS_SHARED and PTHREAD_PROCESS_PRIVATE are the same while we have a single process.
+    spinlock_init(reinterpret_cast<spinlock_t *>(lock));
+    return 0;
+}
+
+int pthread_spin_destroy(pthread_spinlock_t *lock)
+{
+    return 0;
+}
+
+int pthread_spin_lock(pthread_spinlock_t *lock)
+{
+    spin_lock(reinterpret_cast<spinlock_t *>(lock));
+    return 0; // We can't really do deadlock detection
+}
+
+int pthread_spin_trylock(pthread_spinlock_t *lock)
+{
+    if (!spin_trylock(reinterpret_cast<spinlock_t *>(lock))) {
+        return EBUSY;
+    }
+    return 0;
+}
+
+int pthread_spin_unlock(pthread_spinlock_t *lock)
+{
+    spin_unlock(reinterpret_cast<spinlock_t *>(lock));
     return 0;
 }
 
@@ -445,6 +498,12 @@ int pthread_setcancelstate(int state, int *oldstate)
     return 0;
 }
 
+int pthread_setcanceltype(int state, int *oldstate)
+{
+    WARN_STUBBED();
+    return 0;
+}
+
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 {
     // In Linux (the target ABI we're trying to emulate, PTHREAD_ONCE_INIT
@@ -538,26 +597,25 @@ int pthread_equal(pthread_t t1, pthread_t t2)
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr)
 {
-    WARN_STUBBED();
-    return ENOMEM;
+    *(attr) = PTHREAD_MUTEX_DEFAULT;
+    return 0;
 }
 
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr)
 {
-    WARN_STUBBED();
-    return EINVAL;
+    return 0;
 }
 
 int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *type)
 {
-    WARN_STUBBED();
-    return EINVAL;
+    *(type) = *(attr);
+    return 0;
 }
 
 int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type)
 {
-    WARN_STUBBED();
-    return EINVAL;
+    *(attr) = type;
+    return 0;
 }
 
 int pthread_condattr_init(pthread_condattr_t *attr)

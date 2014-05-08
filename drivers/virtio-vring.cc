@@ -277,8 +277,8 @@ namespace virtio {
         //
         // Flushing every half range sounds like a feasible heuristics.
         // We don't want to flush at the levels close to the wrap around since
-        // the call to kick() itself may be delayed due to coalesing reasons as
-        // well and _avail_added_since_kick might wrap around.
+        // the call to kick() itself is not issued for every separate buffer
+        // and _avail_added_since_kick might wrap around due to this bulking.
         //
         if (kicked || (_avail_added_since_kick >= (u16)(~0) / 2)) {
             trace_virtio_kick(_q_index);

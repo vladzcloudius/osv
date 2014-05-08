@@ -7,6 +7,8 @@
 #include <osv/run.hh>
 
 #include <osv/debug.hh>
+#include <errno.h>
+#include <libgen.h>
 
 extern int optind;
 
@@ -18,7 +20,14 @@ namespace osv {
 std::shared_ptr<elf::object> run(std::string path,
                                  int argc, char** argv, int *return_code)
 {
-    auto lib = elf::get_program()->get_library(path);
+    std::shared_ptr<elf::object> lib;
+
+    try {
+        lib = elf::get_program()->get_library(path);
+    } catch(std::exception &e) {
+        // TODO: expose more information about the failure.
+        return nullptr;
+    }
 
     if (!lib) {
         return nullptr;
@@ -27,6 +36,11 @@ std::shared_ptr<elf::object> run(std::string path,
     if (!main) {
         return nullptr;
     }
+
+    char *c_path = (char *)(path.c_str());
+    // path is guaranteed to keep existing this function
+    program_invocation_name = c_path;
+    program_invocation_short_name = basename(c_path);
     // make sure to have a fresh optind across calls
     // FIXME: fails if run() is executed in parallel
     int old_optind = optind;

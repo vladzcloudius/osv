@@ -24,6 +24,7 @@
 #include <osv/elf.hh>
 #include <stdlib.h>
 #include <unordered_map>
+#include <osv/wait_record.hh>
 
 __thread char* percpu_base;
 
@@ -551,6 +552,28 @@ mutex thread_map_mutex;
 std::unordered_map<unsigned long, thread *> thread_map
     __attribute__((init_priority((int)init_prio::threadlist)));
 
+static thread_runtime::duration total_app_time_exited(0);
+
+std::chrono::nanoseconds osv_run_stats()
+{
+    thread_runtime::duration total_app_time;
+
+    WITH_LOCK(thread_map_mutex) {
+        total_app_time = total_app_time_exited;
+        for (auto th : thread_map) {
+            thread *t = th.second;
+            total_app_time += t->thread_clock();
+        }
+    }
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(total_app_time);
+}
+
+int thread::numthreads()
+{
+    SCOPE_LOCK(thread_map_mutex);
+    return thread_map.size();
+}
+
 // We reserve a space in the end of the PID space, so we can reuse those
 // special purpose ids for other things. 4096 positions is arbitrary, but
 // <<should be enough for anybody>> (tm)
@@ -571,12 +594,6 @@ void* thread::do_remote_thread_local_var(void* var)
     auto tls_this = static_cast<char*>(this->_tcb->tls_base);
     auto offset = static_cast<char*>(var) - tls_cur;
     return tls_this + offset;
-}
-
-template <typename T>
-T& thread::remote_thread_local_var(T& var)
-{
-    return *static_cast<T*>(do_remote_thread_local_var(&var));
 }
 
 thread::thread(std::function<void ()> func, attr attr, bool main)
@@ -635,6 +652,14 @@ thread::thread(std::function<void ()> func, attr attr, bool main)
     }
 }
 
+static std::list<std::function<void (thread *)>> exit_notifiers;
+void thread::register_exit_notifier(std::function<void (thread *)> &&n)
+{
+    WITH_LOCK(thread_map_mutex) {
+        exit_notifiers.push_front(std::move(n));
+    }
+}
+
 thread::~thread()
 {
     cancel_this_thread_alarm();
@@ -644,6 +669,11 @@ thread::~thread()
     }
     WITH_LOCK(thread_map_mutex) {
         thread_map.erase(_id);
+        total_app_time_exited += _total_cpu_time;
+
+        for (auto& notifier : exit_notifiers) {
+            notifier(this);
+        }
     }
     if (_attr._stack.deleter) {
         _attr._stack.deleter(_attr._stack);
@@ -761,6 +791,9 @@ void thread::wake_lock(mutex* mtx, wait_record* wr)
         // ones doing it, and that it doesn't wake up while we do
         auto expected = status::waiting;
         if (!st->st.compare_exchange_strong(expected, status::sending_lock, std::memory_order_relaxed)) {
+            // make sure the thread can see wr->woken() == true.  We're still protected by
+            // the mutex, so so need for extra protection
+            wr->clear();
             // let the thread acquire the lock itself
             return;
         }

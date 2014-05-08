@@ -39,6 +39,7 @@
 #define DENTRY_BUCKETS 32
 
 static LIST_HEAD(dentry_hash_head, dentry) dentry_hash_table[DENTRY_BUCKETS];
+static LIST_HEAD(fake, dentry) fake;
 static struct mutex dentry_hash_lock;
 
 /*
@@ -104,6 +105,39 @@ dentry_lookup(struct mount *mp, char *path)
     }
     mutex_unlock(&dentry_hash_lock);
     return NULL;                /* not found */
+}
+
+void
+dentry_move(struct dentry *dp, struct dentry *parent_dp, char *path)
+{
+    struct dentry *old_pdp = dp->d_parent;
+    char *old_path = dp->d_path;
+
+    if (parent_dp) {
+        dref(parent_dp);
+    }
+    mutex_lock(&dentry_hash_lock);
+    LIST_REMOVE(dp, d_link);
+    dp->d_path = strdup(path);
+    dp->d_parent = parent_dp;
+    LIST_INSERT_HEAD(&dentry_hash_table[dentry_hash(dp->d_mount, path)], dp, d_link);
+    mutex_unlock(&dentry_hash_lock);
+
+    if (old_pdp) {
+        drele(old_pdp);
+    }
+
+    free(old_path);
+}
+
+void
+dentry_remove(struct dentry *dp)
+{
+    mutex_lock(&dentry_hash_lock);
+    LIST_REMOVE(dp, d_link);
+    /* put it on a fake list for drele() to work*/
+    LIST_INSERT_HEAD(&fake, dp, d_link);
+    mutex_unlock(&dentry_hash_lock);
 }
 
 void

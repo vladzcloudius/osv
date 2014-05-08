@@ -507,6 +507,11 @@ zfs_read(vnode_t *vp, struct file* fp, uio_t *uio, int ioflag)
 	xuio_t		*xuio = NULL;
 #endif
 
+	// Return EISDIR when reading from a directory, as Linux does.
+	if (vp->v_type == VDIR) {
+	    return EISDIR;
+	}
+
 	ZFS_ENTER(zfsvfs);
 	ZFS_VERIFY_ZP(zp);
 	os = zfsvfs->z_os;
@@ -636,7 +641,7 @@ out:
 static int zfs_truncate(struct vnode *vp, off_t new_size);
 
 static int
-zfs_arc(vnode_t *vp, struct file* fp, uio_t *uio, unsigned action)
+zfs_arc(vnode_t *vp, struct file* fp, uio_t *uio)
 {
 	znode_t		*zp = VTOZ(vp);
 	zfsvfs_t	*zfsvfs = zp->z_zfsvfs;
@@ -682,7 +687,7 @@ zfs_arc(vnode_t *vp, struct file* fp, uio_t *uio, unsigned action)
 	nbytes = MIN(nbytes, zfs_read_chunk_size -
 		P2PHASE(uio->uio_loffset, zfs_read_chunk_size));
 
-	error = dmu_map_uio(os, zp->z_id, uio, nbytes, action);
+	error = dmu_map_uio(os, zp->z_id, uio, nbytes);
 	if (error) {
 		/* convert checksum errors into IO errors */
 		if (error == ECKSUM)

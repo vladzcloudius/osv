@@ -240,11 +240,9 @@ namespace dhcp {
         _ip_len = ip->ip_hl << 2;
     }
 
-#define LENGTH_OK ((options - packet_start) + op_len + len_check_hdr < _m->m_hdr.mh_len)
 #define PARSE_OP(type, cast, var) do {              \
-    if ((op_len >= (sizeof(cast))) && (LENGTH_OK))  \
-        var = type(*(cast *)(options));             \
-    else return false;                              \
+    assert(op_len >= (sizeof(cast)));               \
+    var = type(*(cast *)(options));                 \
 } while(0);
 
     bool dhcp_mbuf::decode()
@@ -262,20 +260,28 @@ namespace dhcp {
 
         // Parse options
         u8* packet_start = mtod(_m, u8*);
+        u8* limit = packet_start + _m->m_hdr.mh_len;
         u8* options = poptions();
 
         // Skip magic
         options += 4;
 
-        dhcp_option_code op = DHCP_OPTION_PAD;
-        u8 op_len = 0;
-        u8 len_check_hdr = 2;
-
-        while (LENGTH_OK && (op != DHCP_OPTION_END)) {
+        while (options < limit) {
             dhcp_option_code op = dhcp_option_code(*options++);
-            op_len = *options++;
+            if (op == DHCP_OPTION_END) {
+                break;
+            }
 
-            len_check_hdr = 0;
+            if (op == DHCP_OPTION_PAD) {
+                continue;
+            }
+
+            assert(options < limit);
+
+            u8 op_len = *options++;
+
+            assert(options + op_len <= limit);
+
             switch (op) {
             case DHCP_OPTION_MESSAGE_TYPE:
                 PARSE_OP(dhcp_message_type, u8, _message_type);
@@ -331,34 +337,9 @@ namespace dhcp {
             }
 
             options += op_len;
-            len_check_hdr = 2;
         }
 
         return true;
-    }
-
-    u8* dhcp_mbuf::lookup_option(dhcp_option_code type, u8 *len)
-    {
-        u8* packet_start = mtod(_m, u8*);
-        u8* options = poptions();
-
-        // Skip magic
-        options += 4;
-
-        dhcp_option_code op = DHCP_OPTION_PAD;
-        while (((options - packet_start) < _m->m_hdr.mh_len) && (op != DHCP_OPTION_END)) {
-            dhcp_option_code op = dhcp_option_code(*options++);
-            u8 op_len = *options++;
-
-            if ((op == type) && ((options - packet_start) + op_len < _m->m_hdr.mh_len)) {
-                *len = op_len;
-                return (options);
-            }
-
-            options += op_len;
-        }
-
-        return nullptr;
     }
 
     struct ip* dhcp_mbuf::pip()
@@ -514,6 +495,9 @@ namespace dhcp {
             // TODO: check that the IP address is not responding with ARP
             // RFC2131 section 3.1.5
 
+            printf("%s: %s\n",
+                _ifp->if_xname,
+                 dm.get_your_ip().to_string().c_str());
             dhcp_i("Configuring %s: ip %s subnet mask %s gateway %s MTU %d",
                 _ifp->if_xname,
                  dm.get_your_ip().to_string().c_str(),

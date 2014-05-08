@@ -485,8 +485,7 @@ solisten_proto(struct socket *so, int backlog)
 
 	SOCK_LOCK_ASSERT(so);
 
-	if (backlog < 0 || backlog > somaxconn)
-		backlog = somaxconn;
+	backlog = somaxconn;
 	so->so_qlimit = backlog;
 	so->so_options |= SO_ACCEPTCONN;
 }
@@ -582,6 +581,13 @@ sofree(struct socket *so)
 	sodealloc(so);
 }
 
+static void flush_net_channel(struct socket *so)
+{
+	if (so->so_nc) {
+		so->so_nc->process_queue();
+	}
+}
+
 /*
  * Close a socket on last file table reference removal.  Initiate disconnect
  * if connected.  Free socket when disconnect complete.
@@ -648,6 +654,7 @@ drop:
 	}
 	ACCEPT_LOCK();
 	SOCK_LOCK(so);
+	flush_net_channel(so);
 	KASSERT((so->so_state & SS_NOFDREF) == 0, ("soclose: NOFDREF"));
 	so->so_state |= SS_NOFDREF;
 	so->fp = NULL;
@@ -970,9 +977,7 @@ sosend_generic(struct socket *so, struct bsd_sockaddr *addr, struct uio *uio,
 		goto out;
 
 restart:
-	if (so->so_nc) {
-		so->so_nc->process_queue();
-	}
+	flush_net_channel(so);
 	do {
 		if (so->so_snd.sb_state & SBS_CANTSENDMORE) {
 			error = EPIPE;
@@ -1232,12 +1237,10 @@ soreceive_generic(struct socket *so, struct bsd_sockaddr **psa, struct uio *uio,
 	SOCK_LOCK(so);
 	error = sblock(so, &so->so_rcv, SBLOCKWAIT(flags));
 	if (error)
-		return (error);
+		goto out;
 
 restart:
-	if (so->so_nc) {
-		so->so_nc->process_queue();
-	}
+	flush_net_channel(so);
 	m = so->so_rcv.sb_mb;
 	/*
 	 * If we have less data than requested, block awaiting more (subject
@@ -1628,6 +1631,7 @@ dontblock:
 		*flagsp |= flags;
 release:
 	sbunlock(so, &so->so_rcv);
+out:
 	SOCK_UNLOCK(so);
 	return (error);
 }

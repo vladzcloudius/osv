@@ -8,20 +8,12 @@
 #include "isa-serial.hh"
 #include <string.h>
 
-IsaSerialConsole::IsaSerialConsole(sched::thread* poll_thread, const termios *tio)
-    : _irq(4, [=] { poll_thread->wake(); }), _tio(tio)
-{
-	reset();
-}
+namespace console {
 
 void IsaSerialConsole::write(const char *str, size_t len)
 {
-    while (len > 0) {
-        if ((*str == '\n') && (_tio->c_oflag & OPOST) && (_tio->c_oflag & ONLCR))
-            writeByte('\r');
+    while (len-- > 0)
         writeByte(*str++);
-        len--;
-    }
 }
 
 bool IsaSerialConsole::input_ready()
@@ -76,4 +68,11 @@ void IsaSerialConsole::reset() {
     // interrupts to be generated. QEMU doesn't bother checking this
     // bit, but interestingly VMWare does, so we must set it.
     pci::outb(MCR_AUX_OUTPUT_2, ioport + MCR_ADDRESS);
+}
+
+void IsaSerialConsole::dev_start() {
+    _irq = new gsi_edge_interrupt(4, [&] { _thread->wake(); });
+    reset();
+}
+
 }

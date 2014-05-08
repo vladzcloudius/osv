@@ -9,6 +9,7 @@
 #define TRACE_HH_
 
 #include <iostream>
+#include <iterator>
 #include <tuple>
 #include <boost/format.hpp>
 #include <osv/types.h>
@@ -27,6 +28,11 @@ void enable_trace();
 void enable_tracepoint(std::string wildcard);
 
 class tracepoint_base;
+
+struct blob_tag {};
+
+template<typename T>
+using is_blob = std::is_base_of<blob_tag, T>;
 
 struct trace_record {
     tracepoint_base* tp;
@@ -75,7 +81,7 @@ boost::format format_tuple(const char* fmt, std::tuple<args...> as)
     return format_tuple(format, as);
 }
 
-template <typename T>
+template <typename T, typename = void>
 struct signature_char;
 
 template <>
@@ -148,25 +154,49 @@ struct signature_char<const char*> {
     static const char sig = 'p';  // "pascal string"
 };
 
-template <typename... args>
-struct signature_helper;
-
-template <>
-struct signature_helper<> {
-    static const u64 sig = 0;
+template <typename T>
+struct signature_char<T, typename std::enable_if<is_blob<T>::value>::type> {
+    static const char sig = '*';
 };
 
-template <typename arg0, typename... args>
-struct signature_helper<arg0, args...> {
-    static const u64 sig = signature_char<arg0>::sig
-                    | (signature_helper<args...>::sig << 8);
+template <typename... Args>
+struct signature_helper {
+    static constexpr const char sig[] = { signature_char<Args>::sig..., '\0'};
 };
+
+template <typename... Args>
+constexpr const char signature_helper<Args...>::sig[];
+
+template <typename, typename = void>
+struct object_serializer;
 
 template <typename arg>
-struct object_serializer {
+struct object_serializer<arg, typename std::enable_if<!is_blob<arg>::value>::type> {
     void serialize(arg val, void* buffer) { *static_cast<arg*>(buffer) = val; }
-    size_t size() { return sizeof(arg); }
+    size_t size(arg val) { return sizeof(arg); }
     size_t alignment() { return std::min(sizeof(arg), sizeof(long)); } // FIXME: want to use alignof here
+};
+
+template <typename T>
+struct object_serializer<T, typename std::enable_if<is_blob<T>::value>::type> {
+    using len_t = u16;
+    typedef typename std::iterator_traits<typename T::iterator>::value_type value_type;
+    static_assert(sizeof(value_type) == 1, "value must be one byte long");
+
+    [[gnu::always_inline]]
+    void serialize(T range, void* _buffer) {
+        auto data_buf = reinterpret_cast<value_type*>(_buffer + sizeof(len_t));
+        size_t count = 0;
+        for (auto& item : range) {
+            *data_buf++ = item;
+            count++;
+        }
+        assert(count <= std::numeric_limits<len_t>::max());
+        *static_cast<len_t*>(_buffer) = count;
+    }
+
+    size_t size(T range) { return std::distance(std::begin(range), std::end(range)) + sizeof(len_t); }
+    size_t alignment() { return sizeof(len_t); }
 };
 
 template <>
@@ -174,6 +204,7 @@ struct object_serializer<const char*> {
     static constexpr size_t max_len = 50;
     [[gnu::always_inline]]
     void serialize(const char* val, void* _buffer) {
+
         if (!val) {
             val = "<null>";
         }
@@ -197,7 +228,7 @@ struct object_serializer<const char*> {
         return ret;
     }
 
-    size_t size() { return max_len; }
+    size_t size(const char* arg) { return max_len; }
     size_t alignment() { return 1; }
 };
 
@@ -208,14 +239,15 @@ struct serializer {
         auto arg = std::get<idx>(as);
         object_serializer<decltype(arg)> s;
         offset = align_up(offset, s.alignment());
-        s.serialize(arg, buffer + offset);
-        return serializer<idx + 1, N, args...>::write(buffer, offset + s.size(), as);
+        s.serialize(arg, (u8*)buffer + offset);
+        return serializer<idx + 1, N, args...>::write(buffer, offset + s.size(arg), as);
     }
-    static size_t size(size_t offset) {
+    static size_t size(size_t offset, const std::tuple<args...>& as) {
+        auto arg = std::get<idx>(as);
         typedef typename std::tuple_element<idx, std::tuple<args...>>::type argtype;
         object_serializer<argtype> s;
         offset = align_up(offset, s.alignment());
-        return serializer<idx + 1, N, args...>::size(offset + s.size());
+        return serializer<idx + 1, N, args...>::size(offset + s.size(arg), as);
     }
 };
 
@@ -223,7 +255,7 @@ template <size_t N, typename... args>
 struct serializer<N, N, args...> {
     static void write(void* buffer, size_t offset, std::tuple<args...> as) {
     }
-    static size_t size(size_t offset) {
+    static size_t size(size_t offset, const std::tuple<args...>& as) {
         return offset;
     }
 };
@@ -247,7 +279,7 @@ public:
     tracepoint_id id;
     const char* name;
     const char* format;
-    u64 sig;
+    const char* sig;
     typedef boost::intrusive::list_member_hook<> tp_list_link_type;
     tp_list_link_type tp_list_link;
     static boost::intrusive::list<
@@ -275,6 +307,8 @@ private:
     void try_enable();
     void activate();
     void deactivate();
+    void activate(const tracepoint_id &, void * site, void * slow_path);
+    void deactivate(const tracepoint_id &, void * site, void * slow_path);
     void update();
     static std::unordered_set<tracepoint_id>& known_ids();
     static bool _log_backtrace;
@@ -298,21 +332,9 @@ public:
         : tracepoint_base(_id, typeid(*this), name, format) {
         sig = signature();
     }
-    void operator()(r_args... as) {
-#ifdef __x86_64__
-        asm goto("1: .byte 0x0f, 0x1f, 0x44, 0x00, 0x00 \n\t"  // 5-byte nop
-                 ".pushsection .tracepoint_patch_sites, \"a\", @progbits \n\t"
-                 ".quad %c[id] \n\t"
-                 ".quad %c[type] \n\t"
-                 ".quad 1b \n\t"
-                 ".quad %l[slow_path] \n\t"
-                 ".popsection"
-                 : : [type]"i"(&typeid(*this)), [id]"i"(_id) : : slow_path);
-        return;
-        slow_path:
-#endif /* __x86_64__ */
-        trace_slow_path(assign(as...));
-    }
+
+    inline void operator()(r_args... as);
+
     void trace_slow_path(std::tuple<s_args...> as) __attribute__((cold)) {
         if (active) {
             arch::irq_flag_notrace irq;
@@ -327,8 +349,7 @@ public:
         if (!logging) {
             return;
         }
-        auto tr = allocate_trace_record(size());
-        tr->tp = this;
+        auto tr = allocate_trace_record(size(as));
         tr->thread = sched::thread::current();
         tr->thread_name = tr->thread->name_raw();
         tr->time = 0;
@@ -341,16 +362,18 @@ public:
         tr->backtrace = false;
         log_backtrace(tr, buffer);
         serialize(buffer, as);
+        barrier();
+        tr->tp = this; // do this last to indicate the record is complete
     }
     void serialize(void* buffer, std::tuple<s_args...> as) {
-        return serializer<0, sizeof...(s_args), s_args...>::write(buffer, 0, as);
+        serializer<0, sizeof...(s_args), s_args...>::write(buffer, 0, as);
     }
-    size_t size() {
-        return base_size() + serializer<0, sizeof...(s_args), s_args...>::size(0);
+    size_t size(const std::tuple<s_args...>& as) {
+        return base_size() + serializer<0, sizeof...(s_args), s_args...>::size(0, as);
     }
-    // Python struct style signature H=u16, I=u32, Q=u64 etc, packed into a
-    // u64, lsb=first parameter
-    u64 signature() const {
+    // Python struct style signature H=u16, I=u32, Q=u64 etc
+    // Parsed by SlidingUnpacker from scripts/osv/trace.py
+    const char* signature() const {
         return signature_helper<s_args...>::sig;
     }
 };
@@ -380,5 +403,7 @@ static inline const char *trace_strip_prefix(const char *name)
 #define TRACEPOINTV(name, fmt, assign) \
     tracepointv<__COUNTER__, decltype(assign), assign> name(trace_strip_prefix(#name), fmt);
 
+
+#include <arch-trace.hh>
 
 #endif /* TRACE_HH_ */

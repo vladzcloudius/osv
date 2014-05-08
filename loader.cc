@@ -5,10 +5,6 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#ifdef __x86_64__
-#include "drivers/isa-serial.hh"
-#endif /* __x86_64__ */
-
 #include "fs/fs.hh"
 #include <bsd/net.hh>
 #include <boost/format.hpp>
@@ -38,6 +34,9 @@
 #include "drivers/vmxnet3.hh"
 #include "drivers/zfs.hh"
 #include "drivers/pvpanic.hh"
+#include "drivers/console.hh"
+#include "drivers/isa-serial.hh"
+#include "drivers/vga.hh"
 #endif /* !AARCH64_PORT_STUB */
 
 #include <osv/sched.hh>
@@ -137,7 +136,7 @@ static bool opt_leak = false;
 static bool opt_noshutdown = false;
 static bool opt_log_backtrace = false;
 static bool opt_mount = true;
-static bool opt_vga = false;
+static std::string opt_console = "both";
 static bool opt_verbose = false;
 static std::string opt_chdir;
 static bool opt_bootchart = false;
@@ -165,8 +164,8 @@ std::tuple<int, char**> parse_options(int ac, char** av)
         ("leak", "start leak detector after boot")
         ("nomount", "don't mount the file system")
         ("noshutdown", "continue running after main() returns")
-        ("vga", "use vga as a console device")
         ("verbose", "be verbose, print debug messages")
+        ("console", bpo::value<std::vector<std::string>>(), "select console driver")
         ("env", bpo::value<std::vector<std::string>>(), "set Unix-like environment variable (putenv())")
         ("cwd", bpo::value<std::vector<std::string>>(), "set current working directory")
         ("bootchart", "perform a test boot measuring a time distribution of the various operations\n")
@@ -180,7 +179,7 @@ std::tuple<int, char**> parse_options(int ac, char** av)
     } catch(std::exception &e) {
         std::cout << e.what() << '\n';
         std::cout << desc << '\n';
-        abort();
+        osv::poweroff();
     }
     bpo::notify(vars);
 
@@ -220,7 +219,15 @@ std::tuple<int, char**> parse_options(int ac, char** av)
         }
     }
     opt_mount = !vars.count("nomount");
-    opt_vga = vars.count("vga");
+
+    if (vars.count("console")) {
+        auto v = vars["console"].as<std::vector<std::string>>();
+        if (v.size() > 1) {
+            printf("Ignoring '--console' options after the first.");
+        }
+        opt_console = v.front();
+        debug("console=%s\n", opt_console);
+    }
 
     if (vars.count("env")) {
         for (auto t : vars["env"].as<std::vector<std::string>>()) {
@@ -245,6 +252,10 @@ std::tuple<int, char**> parse_options(int ac, char** av)
 // return the std::string and the commands_args poiting to them as a move
 std::vector<std::vector<std::string> > prepare_commands(int ac, char** av)
 {
+    if (ac == 0) {
+        puts("This image has an empty command line. Nothing to run.");
+        osv::poweroff();
+    }
     std::vector<std::vector<std::string> > commands;
     std::string line = std::string("");
     bool ok;
@@ -257,7 +268,8 @@ std::vector<std::vector<std::string> > prepare_commands(int ac, char** av)
     commands = osv::parse_command_line(line, ok);
 
     if (!ok) {
-        abort("Failed to parse commands line\n");
+        puts("Failed to parse command line.");
+        osv::poweroff();
     }
 
     return commands;
@@ -411,7 +423,20 @@ void main_cont(int ac, char** av)
     boot_time.event("SMP launched");
     memory::enable_debug_allocator();
     acpi::init();
-    console::console_init(opt_vga);
+#ifdef __x86_64__
+    if (opt_console.compare("serial") == 0) {
+        console::console_driver_add(new console::IsaSerialConsole());
+    } else if (opt_console.compare("vga") == 0) {
+        console::console_driver_add(new console::VGAConsole());
+    } else if (opt_console.compare("both") == 0) {
+        console::console_driver_add(new console::IsaSerialConsole());
+        console::console_driver_add(new console::VGAConsole());
+    } else {
+        abort("Unknown console:%s", opt_console.c_str());
+    }
+#endif /* __x86_64__ */
+    console::console_init();
+
     // Print only after console is initialized.
     printf("OSv " OSV_VERSION "\n");
 

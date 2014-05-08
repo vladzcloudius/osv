@@ -56,6 +56,7 @@ def add_symbol_resolution_options(parser):
     group.add_argument("-d", "--debug", action="store_true", help="use loader.elf from debug build")
     group.add_argument("-e", "--exe", action="store", help="path to the object file used for symbol resolution")
     group.add_argument("-x", "--no-resolve", action='store_true', help="do not resolve symbols")
+    group.add_argument("--no-inlined-by", action='store_true', help="do not show inlined-by functions")
     group.add_argument("-L", "--show-line-number", action='store_true', help="show line numbers")
     group.add_argument("-A", "--show-address", action='store_true', help="show raw addresses")
     group.add_argument("-F", "--show-file-name", action='store_true', help="show file names")
@@ -65,13 +66,14 @@ class BeautifyingResolver(object):
         self.delegate = delegate
 
     def __call__(self, addr):
-        src_addr = self.delegate(addr)
-        if src_addr.name:
-            if src_addr.name.startswith("void sched::thread::do_wait_until<"):
-                src_addr.name = "sched::thread::do_wait_until"
-            elif src_addr.name.startswith("do_wait_until<"):
-                src_addr.name = "do_wait_until"
-        return src_addr
+        resolution = self.delegate(addr)
+        for src_addr in resolution:
+            if src_addr.name:
+                if src_addr.name.startswith("void sched::thread::do_wait_until<"):
+                    src_addr.name = "sched::thread::do_wait_until"
+                elif src_addr.name.startswith("do_wait_until<"):
+                    src_addr.name = "do_wait_until"
+        return resolution
 
 def symbol_resolver(args):
     if args.no_resolve:
@@ -84,22 +86,27 @@ def symbol_resolver(args):
     else:
         elf_path = 'build/release/loader.elf'
 
-    return BeautifyingResolver(debug.SymbolResolver(elf_path))
+    return BeautifyingResolver(debug.SymbolResolver(elf_path, show_inline=not args.no_inlined_by))
 
 def get_backtrace_formatter(args):
     if not args.backtrace:
         return lambda backtrace: ''
 
     return trace.BacktraceFormatter(
-        symbol_printer(symbol_resolver(args), src_addr_formatter(args)))
+        symbol_resolver(args), src_addr_formatter(args))
 
 def list_trace(args):
+    def data_formatter(sample):
+        if args.tcpdump and is_net_packet_sample(sample):
+            return format_packet_sample(sample)
+        return sample.format_data(sample)
+
     backtrace_formatter = get_backtrace_formatter(args)
     time_range = get_time_range(args)
     with get_trace_reader(args) as reader:
         for t in reader.get_traces():
             if t.time in time_range:
-                print t.format(backtrace_formatter)
+                print t.format(backtrace_formatter, data_formatter=data_formatter)
 
 def add_time_slicing_options(parser):
     group = parser.add_argument_group('time slicing')
@@ -208,14 +215,122 @@ def extract(args):
     else:
         elf_path = 'build/release/loader.elf'
 
-    if (os.path.isfile(elf_path)):
-       sys.exit(os.system("gdb %s -batch -ex conn -ex \"osv trace save %s\"" % (elf_path, args.tracefile)))
+    if os.path.isfile(elf_path):
+        if os.path.exists(args.tracefile):
+            os.remove(args.tracefile)
+            assert(not os.path.exists(args.tracefile))
+        cmdline = ['gdb', elf_path, '-batch']
+        if args.remote:
+            cmdline.extend(['-ex', 'target remote ' + args.remote])
+        else:
+            cmdline.extend(['-ex', 'conn'])
+        cmdline.extend(['-ex', 'osv trace save ' + args.tracefile])
+        proc = subprocess.Popen(cmdline, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT)
+        _stdout, _ = proc.communicate()
+        if proc.returncode or not os.path.exists(args.tracefile):
+            print(_stdout)
+            sys.exit(1)
     else:
         print("error: %s not found" % (elf_path))
         sys.exit(1)
 
 def prof_wait(args):
     show_profile(args, get_wait_profile)
+
+def prof_lock(args):
+    def get_profile(traces):
+        return prof.get_duration_profile(traces, "mutex_lock_wait", "mutex_lock_wake")
+    show_profile(args, get_profile)
+
+def needs_dpkt():
+    global dpkt
+    try:
+        import dpkt
+    except ImportError:
+        raise Exception("""Cannot import dpkt. Please install 'python-dpkt' system package.""")
+
+class Protocol:
+    IP = 1
+    IGMP = 2
+    ROUTE = 3
+    AARP = 4
+    ATALK2 = 5
+    ATALK1 = 6
+    ARP = 7
+    IPX = 8
+    ETHER = 9
+    IPV6 = 10
+    NATM = 11
+    EPAIR = 12
+
+def write_sample_to_pcap(sample, pcap_writer):
+    assert(is_net_packet_sample(sample))
+
+    ts = sample.time / 1e9
+    proto = int(sample.data[0])
+    if proto == Protocol.ETHER:
+        pcap_writer.writepkt(sample.data[1], ts=ts)
+    else:
+        eth_types = {
+            Protocol.IP: dpkt.ethernet.ETH_TYPE_IP,
+            Protocol.ROUTE: dpkt.ethernet.ETH_TYPE_REVARP,
+            Protocol.AARP: dpkt.ethernet.ETH_TYPE_ARP,
+            Protocol.ARP: dpkt.ethernet.ETH_TYPE_ARP,
+            Protocol.IPX: dpkt.ethernet.ETH_TYPE_IPX,
+            Protocol.IPV6: dpkt.ethernet.ETH_TYPE_IP6,
+        }
+
+        pkt = dpkt.ethernet.Ethernet()
+        pkt.data = sample.data[1]
+        pkt.type = eth_types[proto]
+        pcap_writer.writepkt(pkt, ts=ts)
+
+def format_packet_sample(sample):
+    needs_dpkt()
+    proc = subprocess.Popen(['tcpdump', '-nn', '-t', '-r', '-'], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    pcap = dpkt.pcap.Writer(proc.stdin)
+    write_sample_to_pcap(sample, pcap)
+    pcap.close()
+    assert(proc.stdout.readline() == "reading from file -, link-type EN10MB (Ethernet)\n")
+    packet_line = proc.stdout.readline().rstrip()
+    proc.wait()
+    return packet_line
+
+def is_net_packet_sample(sample):
+    return sample.name.startswith('net_packet_');
+
+def is_input_net_packet_sample(sample):
+    return sample.name == "net_packet_in"
+
+def is_output_net_packet_sample(sample):
+    return sample.name == "net_packet_out"
+
+def pcap_dump(args, target=None):
+    needs_dpkt()
+
+    if not target:
+        target = sys.stdout
+
+    pcap_file = dpkt.pcap.Writer(target)
+    try:
+        with get_trace_reader(args) as reader:
+            for sample in reader.get_traces():
+                if is_input_net_packet_sample(sample) or is_output_net_packet_sample(sample):
+                    write_sample_to_pcap(sample, pcap_file)
+    finally:
+        pcap_file.close()
+
+def tcpdump(args):
+    proc = subprocess.Popen(['tcpdump', '-nn', '-r', '-'], stdin=subprocess.PIPE, stdout=sys.stdout,
+        stderr=subprocess.STDOUT)
+    try:
+        pcap_dump(args, target=proc.stdin)
+    except:
+        proc.kill()
+        raise
+    proc.wait()
 
 def prof_hit(args):
     if args.tracepoint:
@@ -383,6 +498,7 @@ if __name__ == "__main__":
 
     cmd_list = subparsers.add_parser("list", help="list trace")
     add_trace_listing_options(cmd_list)
+    cmd_list.add_argument("--tcpdump", action="store_true")
     cmd_list.set_defaults(func=list_trace, paginate=True)
 
     cmd_list_timed = subparsers.add_parser("list-timed", help="list timed traces", description="""
@@ -413,6 +529,15 @@ if __name__ == "__main__":
     add_profile_options(cmd_prof_wait)
     cmd_prof_wait.set_defaults(func=prof_wait, paginate=True)
 
+    cmd_prof_lock = subparsers.add_parser("prof-lock", help="show lock contention profile", description="""
+        Prints profile showing amount of time for which threads were blocked witing on a mutex.
+        This can be used to estimate lock contention.
+        """)
+    add_symbol_resolution_options(cmd_prof_lock)
+    add_trace_source_options(cmd_prof_lock)
+    add_profile_options(cmd_prof_lock)
+    cmd_prof_lock.set_defaults(func=prof_lock, paginate=True)
+
     cmd_prof_hit = subparsers.add_parser("prof", help="show trace hit profile", description="""
         Prints profile showing number of times given tracepoint was reached.
         Requires trace samples with backtrace.
@@ -428,7 +553,16 @@ if __name__ == "__main__":
         """)
     add_symbol_resolution_options(cmd_extract)
     add_trace_source_options(cmd_extract)
+    cmd_extract.add_argument("-r", "--remote", action="store", help="remote node address:port")
     cmd_extract.set_defaults(func=extract)
+
+    cmd_pcap_dump = subparsers.add_parser("pcap-dump")
+    add_trace_source_options(cmd_pcap_dump)
+    cmd_pcap_dump.set_defaults(func=pcap_dump)
+
+    cmd_tcpdump = subparsers.add_parser("tcpdump")
+    add_trace_source_options(cmd_tcpdump)
+    cmd_tcpdump.set_defaults(func=tcpdump, paginate=True)
 
     args = parser.parse_args()
 

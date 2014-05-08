@@ -24,6 +24,12 @@
 #include <sys/ioctl.h>
 #include <osv/clock.hh>
 #include <osv/mempool.hh>
+#include <osv/version.h>
+
+// FIXME: If we ever support multiple different executables we will have to maybe put those
+// on a shared library
+char *program_invocation_name;
+char *program_invocation_short_name;
 
 int libc_error(int err)
 {
@@ -63,6 +69,8 @@ int getrlimit(int resource, struct rlimit *rlim)
         set(RLIM_INFINITY);
         break;
     case RLIMIT_AS:
+    case RLIMIT_DATA:
+    case RLIMIT_RSS:
         set(RLIM_INFINITY);
         break;
     default:
@@ -77,6 +85,8 @@ int setrlimit(int resource, const struct rlimit *rlim)
     // osv - no limits
     return 0;
 }
+LFS64(getrlimit);
+LFS64(setrlimit);
 
 uid_t geteuid()
 {
@@ -190,4 +200,16 @@ int tcflush(int fd, int what)
 speed_t cfgetospeed(const termios *p)
 {
     return p->__c_ospeed;
+}
+
+extern "C" {
+    const char *gnu_get_libc_version(void)
+    {
+        return OSV_VERSION;
+    }
+
+    const char *gnu_get_libc_release(void)
+    {
+        return "OSv";
+    }
 }

@@ -5,12 +5,13 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
-#include "arch.hh"
 #include "arch-cpu.hh"
 #include <osv/debug.hh>
 #include <osv/sched.hh>
 #include <osv/mmu.hh>
 #include <osv/irqlock.hh>
+#include <osv/interrupt.hh>
+#include <osv/prio.hh>
 
 void page_fault(exception_frame *ef)
 {
@@ -35,4 +36,112 @@ void page_fault(exception_frame *ef)
         mmu::vm_fault(addr, ef);
         fpu.restore();
     }
+}
+
+namespace mmu {
+
+void flush_tlb_local() {
+    // TODO: we can use page_table_root instead of read_cr3(), can be faster
+    // when shadow page tables are used.
+    processor::write_cr3(processor::read_cr3());
+}
+
+// tlb_flush() does TLB flush on *all* processors, not returning before all
+// processors confirm flushing their TLB. This is slow, but necessary for
+// correctness so that, for example, after mprotect() returns, no thread on
+// no cpu can write to the protected page.
+mutex tlb_flush_mutex;
+sched::thread_handle tlb_flush_waiter;
+std::atomic<int> tlb_flush_pendingconfirms;
+
+inter_processor_interrupt tlb_flush_ipi{[] {
+        mmu::flush_tlb_local();
+        if (tlb_flush_pendingconfirms.fetch_add(-1) == 1) {
+            tlb_flush_waiter.wake();
+        }
+}};
+
+void flush_tlb_all()
+{
+    mmu::flush_tlb_local();
+    if (sched::cpus.size() <= 1)
+        return;
+    std::lock_guard<mutex> guard(tlb_flush_mutex);
+    tlb_flush_waiter.reset(*sched::thread::current());
+    tlb_flush_pendingconfirms.store((int)sched::cpus.size() - 1);
+    tlb_flush_ipi.send_allbutself();
+    sched::thread::wait_until([] {
+            return tlb_flush_pendingconfirms.load() == 0;
+    });
+    tlb_flush_waiter.clear();
+}
+
+static pt_element page_table_root __attribute__((init_priority((int)init_prio::pt_root)));
+
+void switch_to_runtime_page_tables()
+{
+    processor::write_cr3(page_table_root.next_pt_addr());
+}
+
+pt_element *get_root_pt(uintptr_t virt __attribute__((unused))) {
+    return &page_table_root;
+}
+
+pt_element make_empty_pte() { return pt_element(); }
+
+pt_element make_pte(phys addr, bool large, unsigned perm)
+{
+    pt_element pte;
+    pte.set_valid(perm != 0);
+    pte.set_writable(perm & perm_write);
+    pte.set_executable(perm & perm_exec);
+    pte.set_dirty(true);
+    pte.set_large(large);
+    pte.set_addr(addr, large);
+
+    arch_pt_element::set_user(&pte, true);
+    arch_pt_element::set_accessed(&pte, true);
+
+    return pte;
+}
+
+pt_element make_normal_pte(phys addr, unsigned perm)
+{
+    return make_pte(addr, false, perm);
+}
+
+pt_element make_large_pte(phys addr, unsigned perm)
+{
+    return make_pte(addr, true, perm);
+}
+
+enum {
+    page_fault_prot  = 1ul << 0,
+    page_fault_write = 1ul << 1,
+    page_fault_user  = 1ul << 2,
+    page_fault_rsvd  = 1ul << 3,
+    page_fault_insn  = 1ul << 4,
+};
+
+bool is_page_fault_insn(unsigned int error_code) {
+    return error_code & page_fault_insn;
+}
+
+bool is_page_fault_write(unsigned int error_code) {
+    return error_code & page_fault_write;
+}
+
+/* Glauber Costa: if page faults because we are trying to execute code here,
+ * we shouldn't be closing the balloon. We should [...] despair.
+ * So by checking only for == page_fault_write, we are guaranteed to close
+ * the balloon in the next branch - which although still bizarre, at least
+ * will give us tracing information that I can rely on for debugging that.
+ * (the reason for that is that there are only fixups for memcpy, and memcpy
+ * can only be used to read or write).
+ * The other bits like present and user should not matter in this case.
+ */
+bool is_page_fault_write_exclusive(unsigned int error_code) {
+    return error_code == page_fault_write;
+}
+
 }

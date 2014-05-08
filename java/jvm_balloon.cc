@@ -4,7 +4,11 @@
 #include <api/assert.h>
 #include <osv/align.hh>
 #include <exceptions.hh>
+
+#ifndef AARCH64_PORT_STUB
 #include <memcpy_decode.hh>
+#endif /* !AARCH64_PORT_STUB */
+
 #include <boost/intrusive/set.hpp>
 #include <osv/trace.hh>
 #include "jvm_balloon.hh"
@@ -283,7 +287,7 @@ void jvm_balloon_shrinker::_thread_loop()
         WITH_LOCK(balloons_lock) {
             _blocked.wait_until(balloons_lock, [&] { return (_pending.load() + _pending_release.load()) > 0; });
 
-            if (balloons.size() >= _soft_max_balloons) {
+            if (balloons.size() > _soft_max_balloons) {
                 memory::wake_reclaimer();
             }
 
@@ -338,7 +342,7 @@ void jvm_balloon_shrinker::_thread_loop()
 // comes after the balloon.
 bool jvm_balloon_fault(balloon_ptr b, exception_frame *ef, mmu::jvm_balloon_vma *vma)
 {
-    if (!ef || (ef->error_code == mmu::page_fault_write)) {
+    if (!ef || mmu::is_page_fault_write_exclusive(ef->get_error())) {
         if (vma->effective_jvm_addr()) {
             return false;
         }
@@ -347,7 +351,12 @@ bool jvm_balloon_fault(balloon_ptr b, exception_frame *ef, mmu::jvm_balloon_vma 
         return true;
     }
 
+#ifdef AARCH64_PORT_STUB
+    void *decode = NULL;
+#else
     memcpy_decoder *decode = memcpy_find_decoder(ef);
+#endif /* AARCH64_PORT_STUB */
+
     if (!decode) {
         if (vma->effective_jvm_addr()) {
             return false;
@@ -357,6 +366,7 @@ bool jvm_balloon_fault(balloon_ptr b, exception_frame *ef, mmu::jvm_balloon_vma 
         return true;
     }
 
+#ifndef AARCH64_PORT_STUB
     unsigned char *dest = memcpy_decoder::dest(ef);
     unsigned char *src = memcpy_decoder::src(ef);
     size_t size = decode->size(ef);
@@ -402,6 +412,7 @@ bool jvm_balloon_fault(balloon_ptr b, exception_frame *ef, mmu::jvm_balloon_vma 
         skip = b->move_balloon(b, vma, dest);
     }
     decode->memcpy_fixup(ef, std::min(skip, size));
+#endif /* !AARCH64_PORT_STUB */
     return true;
 }
 

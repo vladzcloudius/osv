@@ -82,6 +82,7 @@
 #endif /*IPSEC*/
 
 #include <machine/in_cksum.h>
+#include <functional>
 
 static VNET_DEFINE(int, tcp_syncookies) = 1;
 #define	V_tcp_syncookies		VNET(tcp_syncookies)
@@ -110,7 +111,7 @@ static struct socket *syncache_socket(struct syncache *, struct socket *,
 	struct mbuf *m);
 static void syncache_timeout(struct syncache *sc, struct syncache_head *sch,
 	int docallout);
-static void syncache_timer(void *);
+static void syncache_timer(struct syncache_head *sch, serial_timer_task& timer);
 static void syncookie_generate(struct syncache_head *, struct syncache *,
 	u_int32_t *);
 static struct syncache
@@ -153,7 +154,7 @@ SYSCTL_VNET_UINT(_net_inet_tcp_syncache, OID_AUTO, rexmtlimit, CTLFLAG_RW,
 	&VNET_NAME(tcp_syncache.rexmt_limit), 0,
 	"Limit on SYN/ACK retransmissions");
 
-VNET_DEFINE(int, tcp_sc_rst_sock_fail) = 1;
+VNET_DEFINE(int, tcp_sc_rst_sock_fail) = 0; // match Linux behavior
 SYSCTL_VNET_INT(_net_inet_tcp_syncache, OID_AUTO, rst_on_sock_fail,
     CTLFLAG_RW, &VNET_NAME(tcp_sc_rst_sock_fail), 0,
     "Send reset on socket allocation failure");
@@ -181,9 +182,9 @@ MALLOC_DEFINE(M_SYNCACHE, "syncache", "TCP syncache");
 
 #define ENDPTS6_EQ(a, b) (memcmp(a, b, sizeof(*a)) == 0)
 
-#define	SCH_LOCK(sch)		mtx_lock(&(sch)->sch_mtx)
-#define	SCH_UNLOCK(sch)		mtx_unlock(&(sch)->sch_mtx)
-#define	SCH_LOCK_ASSERT(sch)	mtx_assert(&(sch)->sch_mtx, MA_OWNED)
+#define	SCH_LOCK(sch)		mutex_lock(&(sch)->sch_mtx)
+#define	SCH_UNLOCK(sch)		mutex_unlock(&(sch)->sch_mtx)
+#define	SCH_LOCK_ASSERT(sch)	assert(mutex_owned(&(sch)->sch_mtx))
 
 /*
  * Requires the syncache entry to be already removed from the bucket list.
@@ -200,10 +201,17 @@ static void syncache_free(struct syncache *sc)
 	uma_zfree(V_tcp_syncache.zone, sc);
 }
 
+syncache_head::syncache_head()
+	: sch_timer(sch_mtx, std::bind(syncache_timer, this, std::placeholders::_1))
+{
+#ifdef VIMAGE
+	sch_vnet = curvnet;
+#endif
+	TAILQ_INIT(&sch_bucket);
+}
+
 void syncache_init(void)
 {
-	int i;
-
 	V_tcp_syncache.cache_count = 0;
 	V_tcp_syncache.hashsize = TCP_SYNCACHE_HASHSIZE;
 	V_tcp_syncache.bucket_limit = TCP_SYNCACHE_BUCKETLIMIT;
@@ -224,23 +232,8 @@ void syncache_init(void)
 	TUNABLE_INT_FETCH("net.inet.tcp.syncache.cachelimit",
 		&V_tcp_syncache.cache_limit);
 
-	/* Allocate the hash table. */V_tcp_syncache.hashbase = (syncache_head *)malloc(
-		V_tcp_syncache.hashsize * sizeof(struct syncache_head));
-	bzero(V_tcp_syncache.hashbase,
-		V_tcp_syncache.hashsize * sizeof(struct syncache_head));
-
-	/* Initialize the hash buckets. */
-	for (i = 0; i < V_tcp_syncache.hashsize; i++) {
-#ifdef VIMAGE
-		V_tcp_syncache.hashbase[i].sch_vnet = curvnet;
-#endif
-		TAILQ_INIT(&V_tcp_syncache.hashbase[i].sch_bucket);
-		mtx_init(&V_tcp_syncache.hashbase[i].sch_mtx, "tcp_sc_head", NULL,
-			MTX_DEF);
-		callout_init_mtx(&V_tcp_syncache.hashbase[i].sch_timer,
-			&V_tcp_syncache.hashbase[i].sch_mtx, 0);
-		V_tcp_syncache.hashbase[i].sch_length = 0;
-	}
+	/* Allocate the hash table. */
+	V_tcp_syncache.hashbase = new syncache_head[V_tcp_syncache.hashsize];
 
 	/* Create the syncache entry zone. */V_tcp_syncache.zone = uma_zcreate(
 		"syncache", sizeof(struct syncache), NULL, NULL, NULL, NULL,
@@ -258,9 +251,9 @@ syncache_destroy(void)
 
 	/* Cleanup hash buckets: stop timers, free entries, destroy locks. */
 	for (i = 0; i < V_tcp_syncache.hashsize; i++) {
-
 		sch = &V_tcp_syncache.hashbase[i];
-		callout_drain(&sch->sch_timer);
+
+		sch->sch_timer.cancel_sync();
 
 		SCH_LOCK(sch);
 		TAILQ_FOREACH_SAFE(sc, &sch->sch_bucket, sc_hash, nsc)
@@ -270,7 +263,6 @@ syncache_destroy(void)
 			("%s: sch->sch_bucket not empty", __func__));
 		KASSERT(sch->sch_length == 0, ("%s: sch->sch_length %d not 0",
 				__func__, sch->sch_length));
-		mtx_destroy(&sch->sch_mtx);
 	}
 
 	KASSERT(V_tcp_syncache.cache_count == 0, ("%s: cache_count %d not 0",
@@ -278,7 +270,7 @@ syncache_destroy(void)
 
 	/* Free the allocated global resources. */
 	uma_zdestroy(V_tcp_syncache.zone);
-	free(V_tcp_syncache.hashbase, M_SYNCACHE);
+	delete[] V_tcp_syncache.hashbase;
 }
 #endif
 
@@ -348,9 +340,9 @@ static void syncache_timeout(struct syncache *sc, struct syncache_head *sch,
 	sc->sc_rxmits++;
 	if (TSTMP_LT(sc->sc_rxttime, sch->sch_nextc)) {
 		sch->sch_nextc = sc->sc_rxttime;
-		if (docallout)
-			callout_reset(&sch->sch_timer, sch->sch_nextc - bsd_ticks,
-				syncache_timer, (void *)sch);
+		if (docallout) {
+			reschedule(sch->sch_timer, sch->sch_nextc - bsd_ticks);
+		}
 	}
 }
 
@@ -359,17 +351,19 @@ static void syncache_timeout(struct syncache *sc, struct syncache_head *sch,
  * If we have retransmitted an entry the maximum number of times, expire it.
  * One separate timer for each bucket row.
  */
-static void syncache_timer(void *xsch)
+static void syncache_timer(struct syncache_head *sch, serial_timer_task& timer)
 {
-	struct syncache_head *sch = (struct syncache_head *)xsch;
 	struct syncache *sc, *nsc;
 	int tick = bsd_ticks;
 	char *s;
 
 	CURVNET_SET(sch->sch_vnet);
 
-	/* NB: syncache_head has already been locked by the callout. */
-	SCH_LOCK_ASSERT(sch);
+	SCOPE_LOCK(sch->sch_mtx);
+
+	if (!timer.try_fire()) {
+		return;
+	}
 
 	/*
 	 * In the following cycle we may remove some entries and/or
@@ -412,9 +406,9 @@ static void syncache_timer(void *xsch)
 		TCPSTAT_INC(tcps_sc_retransmitted);
 		syncache_timeout(sc, sch, 0);
 	}
-	if (!TAILQ_EMPTY(&(sch)->sch_bucket))
-		callout_reset(&(sch)->sch_timer, (sch)->sch_nextc - tick,
-			syncache_timer, (void *)(sch));
+	if (!TAILQ_EMPTY(&(sch)->sch_bucket)) {
+		reschedule(timer, (sch)->sch_nextc - tick);
+	}
 	CURVNET_RESTORE();
 }
 
@@ -758,7 +752,7 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 #endif /* INET */
 	INP_HASH_WUNLOCK(&V_tcbinfo);
 	tp = intotcpcb(inp);
-	tp->t_state = TCPS_SYN_RECEIVED;
+	tp->set_state(TCPS_SYN_RECEIVED);
 	tp->iss = sc->sc_iss;
 	tp->irs = sc->sc_irs;
 	tcp_rcvseqinit(tp);
@@ -830,6 +824,17 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 	return (NULL );
 }
 
+static void
+syncache_remove_and_free(struct syncache_head *sch, struct syncache *sc)
+{
+	SCH_LOCK_ASSERT(sch);
+	TAILQ_REMOVE(&sch->sch_bucket, sc, sc_hash);
+	sch->sch_length--;
+	V_tcp_syncache.cache_count--;
+	SCH_UNLOCK(sch);
+	syncache_free(sc);
+}
+
 /*
  * This function gets called when we receive an ACK for a
  * socket in the LISTEN state.  We look up the connection
@@ -882,12 +887,6 @@ int syncache_expand(struct in_conninfo *inc, struct tcpopt *to,
 				"(probably spoofed)\n", s, __func__);
 			goto failed;
 		}
-	} else {
-		/* Pull out the entry to unlock the bucket row. */
-		TAILQ_REMOVE(&sch->sch_bucket, sc, sc_hash);
-		sch->sch_length--;
-		V_tcp_syncache.cache_count--;
-		SCH_UNLOCK(sch);
 	}
 
 	/*
@@ -935,17 +934,19 @@ int syncache_expand(struct in_conninfo *inc, struct tcpopt *to,
 
 	*lsop = syncache_socket(sc, *lsop, m);
 
-	if (*lsop == NULL )
+	if (*lsop == NULL) {
 		TCPSTAT_INC(tcps_sc_aborted);
-	else
+	} else {
 		TCPSTAT_INC(tcps_sc_completed);
-
-	/* how do we find the inp for the new socket? */
-	if (sc != &scs)
-		syncache_free(sc);
+		if (sc != &scs) {
+			syncache_remove_and_free(sch, sc);
+		}
+	}
 	return (1);
-	failed: if (sc != NULL && sc != &scs)
-		syncache_free(sc);
+failed:
+	if (sc != NULL && sc != &scs) {
+		syncache_remove_and_free(sch, sc);
+	}
 	if (s != NULL )
 		free(s);
 	*lsop = NULL;

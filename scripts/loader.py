@@ -8,6 +8,7 @@ import json
 import math
 import itertools
 import operator
+import heapq
 from glob import glob
 from collections import defaultdict
 
@@ -20,7 +21,7 @@ external = os.path.join(osv_dir, 'external', arch)
 sys.path.append(os.path.join(osv_dir, 'scripts'))
 
 from osv.trace import Trace,TracePoint,BacktraceFormatter,format_time,format_duration
-from osv import trace
+from osv import trace, debug
 
 virtio_driver_type = gdb.lookup_type('virtio::virtio_driver')
 
@@ -72,37 +73,48 @@ def load_elf(path, base):
 
     gdb.execute('add-symbol-file %s %s %s' % (path, text_addr, args))
 
-class syminfo(object):
+class syminfo_resolver(object):
     cache = dict()
-    def __init__(self, addr):
-        if addr in syminfo.cache:
-            cobj = syminfo.cache[addr]
-            self.func = cobj.func
-            self.source = cobj.source
-            return
+
+    def __call__(self, addr):
+        if addr in syminfo_resolver.cache:
+            return self.cache[addr]
         infosym = gdb.execute('info symbol 0x%x' % addr, False, True)
-        self.func = infosym[:infosym.find(" + ")]
+        func = infosym[:infosym.find(" + ")]
         sal = gdb.find_pc_line(addr)
         try :
             # prefer (filename:line),
-            self.source = '%s:%s' % (sal.symtab.filename, sal.line)
+            filename = sal.symtab.filename
+            line = sal.line
         except :
             # but if can't get it, at least give the name of the object
-            if infosym.startswith("No symbol matches") :
-                self.source = None
-            else:
-                self.source = infosym[infosym.rfind("/")+1:].rstrip()
-        if self.source and self.source.startswith('../../'):
-            self.source = self.source[6:]
-        syminfo.cache[addr] = self
-    def __str__(self):
-        ret = self.func
-        if self.source:
-            ret += ' (%s)' % (self.source,)
-        return ret
+            if not infosym.startswith("No symbol matches") :
+                filename = infosym[infosym.rfind("/")+1:].rstrip()
+
+        if filename and filename.startswith('../../'):
+            filename = filename[6:]
+        result = [debug.SourceAddress(addr, name=func, filename=filename, line=line)]
+        syminfo_resolver.cache[addr] = result
+        return result
+
     @classmethod
     def clear_cache(clazz):
         clazz.cache.clear()
+
+symbol_resolver = syminfo_resolver()
+
+def symbol_formatter(src_addr):
+    ret = src_addr.name
+    if src_addr.filename or src_addr.line:
+        ret += ' ('
+        ret += src_addr.filename
+        if src_addr.line:
+            ret += ':' + str(src_addr.line)
+        ret += ')'
+    return ret
+
+def syminfo(addr):
+    return symbol_formatter(syminfo_resolver(addr))
 
 def translate(path):
     '''given a path, try to find it on the host OS'''
@@ -448,7 +460,7 @@ class osv_syms(gdb.Command):
         gdb.Command.__init__(self, 'osv syms',
                              gdb.COMMAND_USER, gdb.COMPLETE_NONE)
     def invoke(self, arg, from_tty):
-        syminfo.clear_cache()
+        syminfo_resolver.clear_cache()
         p = gdb.lookup_global_symbol('elf::program::s_objs').value()
         p = p.dereference().address
         while p.dereference():
@@ -835,13 +847,8 @@ def setup_libstdcxx():
     exec(compile(open(main).read(), main, 'exec'))
 
 def sig_to_string(sig):
-    '''Convert a tracepoing signature encoded in a u64 to a string'''
-    ret = ''
-    while sig != 0:
-        ret += chr(sig & 255)
-        sig >>= 8
-    ret = ret.replace('p', '50p')
-    return ret
+    '''Convert a tracepoing signature to a string'''
+    return sig.replace('p', '50p')
 
 def align_down(v, pagesize):
     return v & ~(pagesize - 1)
@@ -859,9 +866,9 @@ class concat(object):
             l  = len(self.view1)
             if index.start >= l:
                 return self.view2.__getitem__(slice(index.start - l, index.stop - l, index.step))
-            if index.stop >= l:
-                return self.view1.__getitem__(slice(index.start, l, index.step)) + \
-                    self.view2.__getitem__(slice(0, index.stop - l, index.step))
+            if index.stop > l:
+                raise Exception('Slice spans view boundary, index.start=%d, index.stop=%d, l=%d'
+                    % (index.start, index.stop, l))
             return self.view1.__getitem__(index)
 
         if index < len(self.view1):
@@ -876,52 +883,64 @@ def all_traces():
     gdb.lookup_global_symbol('gdb_trace_function_entry')
 
     inf = gdb.selected_inferior()
-    trace_log = gdb.lookup_global_symbol('trace_log').value()
-    if not trace_log:
-    	return
-    max_trace = ulong(gdb.parse_and_eval('max_trace'))
-    trace_log = inf.read_memory(trace_log, max_trace)
     trace_page_size = ulong(gdb.parse_and_eval('trace_page_size'))
-    last = ulong(gdb.lookup_global_symbol('trace_record_last').value()['_M_i'])
-    last %= max_trace
-    pivot = align_up(last, trace_page_size)
-    trace_log = concat(trace_log[pivot:], trace_log[:pivot])
-    last += max_trace - pivot
-
     tp_ptr = gdb.lookup_type('tracepoint_base').pointer()
     backtrace_len = ulong(gdb.parse_and_eval('tracepoint_base::backtrace_len'))
     tracepoints = {}
 
-    i = 0
-    while i < last:
-        tp_key, = struct.unpack('Q', trace_log[i:i+8])
-        if tp_key == 0:
-            i = align_up(i + 8, trace_page_size)
-            continue
+    state = vmstate();
 
-        i += 8
+    trace_buffer_offset = ulong(gdb.parse_and_eval('&percpu_trace_buffer._var'))
 
-        thread, thread_name, time, cpu, flags = struct.unpack('Q16sQII', trace_log[i:i+40])
-        thread_name = thread_name.partition(b'\0')[0].decode()
-        i += 40
+    def one_cpu_trace(cpu):
+        precpu_base = ulong(cpu.obj['percpu_base'])
+        trace_buffer = gdb.parse_and_eval('(trace_buf *)0x%x' % (precpu_base + trace_buffer_offset))
+        trace_log_base_ptr = trace_buffer['_base']
+        trace_log_base  = unique_ptr_get(trace_log_base_ptr)
+        last = ulong(trace_buffer['_last'])
+        max_trace = ulong(trace_buffer['_size'])
 
-        tp = tracepoints.get(tp_key, None)
-        if not tp:
-            tp_ref = gdb.Value(tp_key).cast(tp_ptr)
-            tp = TracePoint(tp_key, str(tp_ref["name"].string()),
-                sig_to_string(ulong(tp_ref['sig'])), str(tp_ref["format"].string()))
-            tracepoints[tp_key] = tp
+        if not trace_log_base:
+            raise StopIteration
 
-        backtrace = None
-        if flags & 1:
-            backtrace = struct.unpack('Q' * backtrace_len, trace_log[i:i+8*backtrace_len])
-            i += 8 * backtrace_len
+        trace_log = inf.read_memory(trace_log_base, max_trace)
 
-        size = struct.calcsize(tp.signature)
-        data = struct.unpack(tp.signature, trace_log[i:i+size])
-        i += size
-        i = align_up(i, 8)
-        yield Trace(tp, thread, thread_name, time, cpu, data, backtrace=backtrace)
+        last %= max_trace
+        pivot = align_up(last, trace_page_size)
+        trace_log = concat(trace_log[pivot:], trace_log[:last])
+
+        unpacker = trace.SlidingUnpacker(trace_log)
+        while unpacker:
+            tp_key, = unpacker.unpack('Q')
+            if tp_key == 0:
+                unpacker.align_up(trace_page_size)
+                continue
+
+            # end marker. record being written
+            if tp_key == -1:
+                break
+
+            thread, thread_name, time, cpu, flags = unpacker.unpack('Q16sQII')
+            thread_name = thread_name.partition(b'\0')[0].decode()
+
+            tp = tracepoints.get(tp_key, None)
+            if not tp:
+                tp_ref = gdb.Value(tp_key).cast(tp_ptr)
+
+                tp = TracePoint(tp_key, str(tp_ref["name"].string()),
+                    sig_to_string(str(tp_ref["sig"].string())), str(tp_ref["format"].string()))
+                tracepoints[tp_key] = tp
+
+            backtrace = None
+            if flags & 1:
+                backtrace = unpacker.unpack('Q' * backtrace_len)
+
+            data = unpacker.unpack(tp.signature)
+            unpacker.align_up(8)
+            yield Trace(tp, thread, thread_name, time, cpu, data, backtrace=backtrace)
+
+    iters = map(lambda cpu: one_cpu_trace(cpu), values(state.cpu_list))
+    return heapq.merge(*iters)
 
 def save_traces_to_file(filename):
     trace.write_to_file(filename, list(all_traces()))
@@ -931,7 +950,7 @@ def make_symbolic(addr):
 
 def dump_trace(out_func):
     indents = defaultdict(int)
-    bt_formatter = BacktraceFormatter(make_symbolic)
+    bt_formatter = BacktraceFormatter(symbol_resolver, symbol_formatter)
 
     def lookup_tp(name):
         return gdb.lookup_global_symbol(name).value().dereference()
@@ -1170,7 +1189,7 @@ class osv_pagetable_walk(gdb.Command):
     def invoke(self, arg, from_tty):
         addr = gdb.parse_and_eval(arg)
         addr = ulong(addr)
-        ptep = ulong(gdb.lookup_global_symbol('mmu::page_table_root').value().address)
+        ptep = ulong(gdb.lookup_symbol('mmu::page_table_root')[0].value().address)
         level = 4
         while level >= 0:
             ptep1 = phys_cast(ptep, ulong_type)

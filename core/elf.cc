@@ -131,12 +131,39 @@ void* object::lookup(const char* symbol)
     return sm.relocated_addr();
 }
 
+std::vector<Elf64_Shdr> object::sections()
+{
+    size_t bytes = size_t(_ehdr.e_shentsize) * _ehdr.e_shnum;
+    std::unique_ptr<char[]> tmp(new char[bytes]);
+    read(_ehdr.e_shoff, tmp.get(), bytes);
+    auto p = tmp.get();
+    std::vector<Elf64_Shdr> ret;
+    for (unsigned i = 0; i < _ehdr.e_shnum; ++i, p += _ehdr.e_shentsize) {
+        ret.push_back(*reinterpret_cast<Elf64_Shdr*>(p));
+    }
+    return ret;
+}
+
+std::string object::section_name(const Elf64_Shdr& shdr)
+{
+    if (_ehdr.e_shstrndx == SHN_UNDEF) {
+        return {};
+    }
+    if (!_section_names_cache) {
+        auto s = sections().at(_ehdr.e_shstrndx);
+        std::unique_ptr<char[]> p(new char[s.sh_size]);
+        read(s.sh_offset, p.get(), s.sh_size);
+        _section_names_cache = std::move(p);
+    }
+    return _section_names_cache.get() + shdr.sh_name;
+}
+
 file::file(program& prog, ::fileref f, std::string pathname)
-: object(prog, pathname)
+    : object(prog, pathname)
     , _f(f)
 {
-load_elf_header();
-load_program_headers();
+    load_elf_header();
+    load_program_headers();
 }
 
 file::~file()
@@ -161,9 +188,19 @@ void memory_image::unload_segment(const Elf64_Phdr& phdr)
 {
 }
 
+void memory_image::read(Elf64_Off offset, void* data, size_t size)
+{
+    throw std::runtime_error("cannot load from Elf memory image");
+}
+
 void file::load_elf_header()
 {
-    read(_f, &_ehdr, 0, sizeof(_ehdr));
+    try {
+        read(0, &_ehdr, sizeof(_ehdr));
+    } catch(error &e) {
+        throw std::runtime_error(
+                std::string("can't read elf header: ") + strerror(e.get()));
+    }
     if (!(_ehdr.e_ident[EI_MAG0] == '\x7f'
           && _ehdr.e_ident[EI_MAG1] == 'E'
           && _ehdr.e_ident[EI_MAG2] == 'L'
@@ -183,6 +220,11 @@ void file::load_elf_header()
           || _ehdr.e_ident[EI_OSABI] == 0)) {
         throw std::runtime_error("bad os abi");
     }
+}
+
+void file::read(Elf64_Off offset, void* data, size_t size)
+{
+    ::read(_f, data, offset, size);
 }
 
 namespace {
@@ -222,34 +264,52 @@ void file::load_program_headers()
 {
     _phdrs.resize(_ehdr.e_phnum);
     for (unsigned i = 0; i < _ehdr.e_phnum; ++i) {
-        read(_f, &_phdrs[i],
-            _ehdr.e_phoff + i * _ehdr.e_phentsize,
+        read(_ehdr.e_phoff + i * _ehdr.e_phentsize,
+            &_phdrs[i],
             _ehdr.e_phentsize);
     }
 }
 
-#ifndef AARCH64_PORT_STUB
 namespace {
 
 ulong page_size = 4096;
 
 }
-#endif /* !AARCH64_PORT_STUB */
 
 void file::load_segment(const Elf64_Phdr& phdr)
 {
-#ifndef AARCH64_PORT_STUB
     ulong vstart = align_down(phdr.p_vaddr, page_size);
     ulong filesz_unaligned = phdr.p_vaddr + phdr.p_filesz - vstart;
     ulong filesz = align_up(filesz_unaligned, page_size);
     ulong memsz = align_up(phdr.p_vaddr + phdr.p_memsz, page_size) - vstart;
-    mmu::map_file(_base + vstart, filesz, mmu::mmap_fixed, mmu::perm_rwx,
+
+    unsigned perm = 0;
+    if (phdr.p_flags & PF_X)
+        perm |= mmu::perm_exec;
+    if (phdr.p_flags & PF_W)
+        perm |= mmu::perm_write;
+    if (phdr.p_flags & PF_R)
+        perm |= mmu::perm_read;
+
+    auto mlock_flag = mlocked() ? mmu::mmap_populate : 0;
+    mmu::map_file(_base + vstart, filesz, mmu::mmap_fixed | mlock_flag, perm,
                   _f, align_down(phdr.p_offset, page_size));
-    memset(_base + vstart + filesz_unaligned, 0, filesz - filesz_unaligned);
-    mmu::map_anon(_base + vstart + filesz, memsz - filesz, mmu::mmap_fixed, mmu::perm_rwx);
-#else /* AARCH64_PORT_STUB */
-    abort();
-#endif /* AARCH64_PORT_STUB */
+    if (phdr.p_filesz != phdr.p_memsz) {
+        assert(perm & mmu::perm_write);
+        memset(_base + vstart + filesz_unaligned, 0, filesz - filesz_unaligned);
+        mmu::map_anon(_base + vstart + filesz, memsz - filesz,
+                      mmu::mmap_fixed | mlock_flag, perm);
+    }
+}
+
+bool file::mlocked()
+{
+    for (auto&& s : sections()) {
+        if (section_name(s) == ".note.osv-mlock") {
+            return true;
+        }
+    }
+    return false;
 }
 
 void object::load_segments()
@@ -287,16 +347,12 @@ void object::load_segments()
 
 void file::unload_segment(const Elf64_Phdr& phdr)
 {
-#ifndef AARCH64_PORT_STUB
     ulong vstart = align_down(phdr.p_vaddr, page_size);
     ulong filesz_unaligned = phdr.p_vaddr + phdr.p_filesz - vstart;
     ulong filesz = align_up(filesz_unaligned, page_size);
     ulong memsz = align_up(phdr.p_vaddr + phdr.p_memsz, page_size) - vstart;
     mmu::munmap(_base + vstart, filesz);
     mmu::munmap(_base + vstart + filesz, memsz - filesz);
-#else /* AARCH64_PORT_STUB */
-    abort();
-#endif
 }
 
 void object::unload_segments()
@@ -311,6 +367,20 @@ void object::unload_segments()
             break;
         }
      }
+}
+
+void object::fix_permissions()
+{
+    for (auto&& phdr : _phdrs) {
+        if (phdr.p_type != PT_GNU_RELRO)
+            continue;
+
+        ulong vstart = align_down(phdr.p_vaddr, page_size);
+        ulong memsz = align_up(phdr.p_vaddr + phdr.p_memsz, page_size) - vstart;
+
+        assert((phdr.p_flags & (PF_R | PF_W | PF_X)) == PF_R);
+        mmu::mprotect(_base + vstart, memsz, mmu::perm_read);
+    }
 }
 
 template <typename T>
@@ -388,7 +458,7 @@ symbol_module object::symbol(unsigned idx)
     auto nameidx = sym->st_name;
     auto name = dynamic_ptr<const char>(DT_STRTAB) + nameidx;
     auto ret = _prog.lookup(name);
-    auto binding = sym->st_info >> 4;
+    auto binding = symbol_binding(*sym);
     if (!ret.symbol && binding == STB_WEAK) {
         return symbol_module(sym, this);
     }
@@ -400,9 +470,6 @@ symbol_module object::symbol(unsigned idx)
 
 void object::relocate_rela()
 {
-#ifdef AARCH64_PORT_STUB
-    abort();
-#endif
     auto rela = dynamic_ptr<Elf64_Rela>(DT_RELA);
     assert(dynamic_val(DT_RELAENT) == sizeof(Elf64_Rela));
     unsigned nb = dynamic_val(DT_RELASZ) / sizeof(Elf64_Rela);
@@ -458,24 +525,30 @@ void object::relocate_pltgot()
         // The prelinker saved us in pltgot[1] the address of .plt + 0x16.
         original_plt = static_cast<void*>(_base + (u64)pltgot[1]);
     }
+    bool bind_now = dynamic_exists(DT_BIND_NOW);
 
     auto rel = dynamic_ptr<Elf64_Rela>(DT_JMPREL);
     auto nrel = dynamic_val(DT_PLTRELSZ) / sizeof(*rel);
     for (auto p = rel; p < rel + nrel; ++p) {
         auto info = p->r_info;
-          u32 type = info & 0xffffffff;
-          assert(type == R_X86_64_JUMP_SLOT);
-          void *addr = _base + p->r_offset;
-          if (original_plt) {
-              // Restore the link to the original plt.
-              // We know the JUMP_SLOT entries are in plt order, and that
-              // each plt entry is 16 bytes.
-              *static_cast<void**>(addr) = original_plt + (p-rel)*16;
-          } else {
-              // The JUMP_SLOT entry already points back to the PLT, just
-              // make sure it is relocated relative to the object base.
-              *static_cast<u64*>(addr) += reinterpret_cast<u64>(_base);
-          }
+        u32 type = info & 0xffffffff;
+        assert(type == R_X86_64_JUMP_SLOT);
+        void *addr = _base + p->r_offset;
+        if (bind_now) {
+            // If on-load binding is requested (instead of the default lazy
+            // binding), resolve all the PLT entries now.
+            u32 idx = info >> 32;
+            *static_cast<void**>(addr) = symbol(idx).relocated_addr();
+        } else if (original_plt) {
+            // Restore the link to the original plt.
+            // We know the JUMP_SLOT entries are in plt order, and that
+            // each plt entry is 16 bytes.
+            *static_cast<void**>(addr) = original_plt + (p-rel)*16;
+        } else {
+            // The JUMP_SLOT entry already points back to the PLT, just
+            // make sure it is relocated relative to the object base.
+            *static_cast<u64*>(addr) += reinterpret_cast<u64>(_base);
+        }
     }
     // PLTGOT resolution has a special calling convention, with the symbol
     // index and some word pushed on the stack, so we need an assembly
@@ -645,7 +718,7 @@ dladdr_info object::lookup_addr(const void* addr)
         if (type != STT_OBJECT && type != STT_FUNC) {
             continue;
         }
-        auto bind = (sym.st_info >> 4) & 15;
+        auto bind = symbol_binding(sym);
         if (bind != STB_GLOBAL && bind != STB_WEAK) {
             continue;
         }
@@ -874,6 +947,7 @@ program::get_library(std::string name, std::vector<std::string> extra_path)
         add_debugger_obj(ef.get());
         ef->load_needed();
         ef->relocate();
+        ef->fix_permissions();
         ef->run_init_funcs();
         ef->setprivate(false);
         _files[name] = ef;
@@ -888,7 +962,16 @@ void program::remove_object(object *ef)
 {
     SCOPE_LOCK(_mutex);
     trace_elf_unload(ef->pathname().c_str());
+
+    // ensure that any module rcu callbacks are completed before static destructors
+    osv::rcu_flush();
+
     ef->run_fini_funcs();
+
+    // ensure that any module rcu callbacks launched by static destructors
+    // are completed before we delete the module
+    osv::rcu_flush();
+
     ef->unload_needed();
     del_debugger_obj(ef);
     // Note that if we race with get_library() of the same library, we may
@@ -905,6 +988,7 @@ void program::remove_object(object *ef)
     new_modules->subs++;
     _modules_rcu.assign(new_modules.release());
     osv::rcu_dispose(old_modules);
+
     // We want to unload and delete ef, but need to delay that until no
     // concurrent dl_iterate_phdr() is still using the modules it got from
     // modules_get().

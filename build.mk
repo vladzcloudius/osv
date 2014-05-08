@@ -132,7 +132,7 @@ configuration += -DNDEBUG
 endif
 
 ifeq ($(arch),x64)
-arch-cflags = -msse4.1
+arch-cflags = -msse2
 endif
 
 ifeq ($(arch),aarch64)
@@ -209,6 +209,8 @@ boost-tests += tests/tst-stat.so
 boost-tests += tests/tst-wait-for.so
 boost-tests += tests/tst-bsd-tcp1.so
 boost-tests += tests/tst-async.so
+boost-tests += tests/tst-rcu-list.so
+boost-tests += tests/tst-tcp-listen.so
 
 java_tests := tests/hello/Hello.class
 
@@ -226,7 +228,10 @@ tests += tests/misc-mmap-anon-perf.so
 tests += tests/tst-mmap-file.so
 tests += tests/misc-mmap-big-file.so
 tests += tests/tst-mmap.so
+tests/tst-mmap.so: COMMON += -Wl,-z,now
 tests += tests/tst-huge.so
+tests += tests/tst-elf-permissions.so
+tests/tst-elf-permissions.so: COMMON += -Wl,-z,relro
 tests += tests/misc-mutex.so
 tests += tests/misc-sockets.so
 tests += tests/tst-condvar.so
@@ -236,6 +241,7 @@ tests += tests/tst-pipe.so
 tests += tests/tst-yield.so
 tests += tests/misc-ctxsw.so
 tests += tests/tst-readdir.so
+tests += tests/tst-read.so
 tests += tests/tst-remove.so
 tests += tests/misc-wake.so
 tests += tests/tst-epoll.so
@@ -245,6 +251,7 @@ tests += tests/tst-sleep.so
 tests += tests/tst-resolve.so
 tests += tests/tst-except.so
 tests += tests/misc-tcp-sendonly.so
+tests += tests/tst-tcp-nbwrite.so
 tests += tests/misc-tcp-hash-srv.so
 tests += tests/misc-loadbalance.so
 tests += tests/misc-scheduler.so
@@ -258,6 +265,7 @@ tests += tests/tst-utimes.so
 tests += tests/misc-tcp.so
 tests += tests/tst-strerror_r.so
 tests += tests/misc-random.so
+tests += tests/misc-urandom.so
 tests += tests/tst-commands.so
 tests += tests/tst-threadcomplete.so
 tests += tests/tst-timerfd.so
@@ -270,6 +278,9 @@ tests += tests/tst-hello.so
 tests += tests/tst-concurrent-init.so
 tests += tests/tst-ring-spsc-wraparound.so
 tests += tests/tst-shm.so
+tests += tests/tst-align.so
+tests += tests/misc-tcp-close-without-reading.so
+tests += tests/tst-sigwait.so
 
 tests/hello/Hello.class: javabase=tests/hello
 
@@ -368,6 +379,7 @@ loader.img: preboot.bin loader-stripped.elf
 endif # aarch64
 
 bsd/sys/crypto/sha2/sha2.o: CFLAGS+=-Wno-strict-aliasing
+bsd/sys/crypto/rijndael/rijndael-api-fst.o: CFLAGS+=-Wno-strict-aliasing
 
 include $(src)/bsd/cddl/contrib/opensolaris/lib/libuutil/common/build.mk
 include $(src)/bsd/cddl/contrib/opensolaris/lib/libzfs/common/build.mk
@@ -376,6 +388,9 @@ include $(src)/bsd/cddl/contrib/opensolaris/cmd/zfs/build.mk
 
 bsd  = bsd/net.o  
 bsd += bsd/$(arch)/machine/in_cksum.o
+bsd += bsd/sys/crypto/rijndael/rijndael-alg-fst.o
+bsd += bsd/sys/crypto/rijndael/rijndael-api.o
+bsd += bsd/sys/crypto/rijndael/rijndael-api-fst.o
 bsd += bsd/sys/crypto/sha2/sha2.o
 bsd += bsd/sys/libkern/arc4random.o
 bsd += bsd/sys/libkern/random.o
@@ -471,6 +486,15 @@ bsd += bsd/sys/xen/xenbus/xenbusb.o
 bsd += bsd/sys/xen/xenbus/xenbusb_front.o
 bsd += bsd/sys/dev/xen/netfront/netfront.o
 bsd += bsd/sys/dev/xen/blkfront/blkfront.o
+endif
+
+ifeq ($(arch),x64)
+bsd += bsd/sys/dev/random/hash.o
+bsd += bsd/sys/dev/random/randomdev_soft.o
+bsd += bsd/sys/dev/random/yarrow.o
+bsd += bsd/sys/dev/random/random_harvestq.o
+bsd += bsd/sys/dev/random/harvest.o
+bsd += bsd/sys/dev/random/live_entropy_sources.o
 endif
 
 bsd/sys/%.o: COMMON += -Wno-sign-compare -Wno-narrowing -Wno-write-strings -Wno-parentheses -Wno-unused-but-set-variable
@@ -639,17 +663,21 @@ libtsm += drivers/libtsm/tsm_vte.o
 libtsm += drivers/libtsm/tsm_vte_charsets.o
 
 drivers := $(bsd) $(solaris)
+drivers += core/mmu.o
+drivers += arch/$(arch)/early-console.o
 drivers += drivers/console.o
-drivers += arch/$(arch)/debug-console.o
+drivers += drivers/console-multiplexer.o
+drivers += drivers/console-driver.o
+drivers += drivers/line-discipline.o
 drivers += drivers/clock.o
 drivers += drivers/clockevent.o
 drivers += drivers/ramdisk.o
 drivers += core/elf.o
+drivers += java/jvm_balloon.o
 
 ifeq ($(arch),x64)
 drivers += $(libtsm)
 drivers += drivers/vga.o drivers/kbd.o drivers/isa-serial.o
-drivers += core/mmu.o
 drivers += core/interrupt.o
 drivers += core/pvclock-abi.o
 drivers += drivers/device.o
@@ -675,11 +703,15 @@ drivers += drivers/pci.o
 drivers += drivers/scsi-common.o
 drivers += drivers/vmw-pvscsi.o
 drivers += drivers/zfs.o
-drivers += java/jvm_balloon.o
 drivers += java/java_api.o
 endif # x64
 
+ifeq ($(arch),aarch64)
+drivers += drivers/pl011.o
+endif # aarch64
+
 objects := bootfs.o
+objects += arch/$(arch)/arch-trace.o
 objects += arch/$(arch)/arch-setup.o
 objects += arch/$(arch)/signal.o
 objects += arch/$(arch)/string.o
@@ -688,12 +720,18 @@ objects += arch/$(arch)/backtrace.o
 objects += arch/$(arch)/smp.o
 objects += arch/$(arch)/elf-dl.o
 objects += arch/$(arch)/entry.o
+objects += arch/$(arch)/mmu.o
+
+ifeq ($(arch),aarch64)
+objects += arch/$(arch)/arm-clock.o
+objects += arch/$(arch)/gic.o
+endif
 
 ifeq ($(arch),x64)
+objects += arch/x64/arch-trace.o
 objects += arch/x64/dump.o
 objects += arch/x64/exceptions.o
 objects += arch/x64/ioapic.o
-objects += arch/x64/mmu.o
 objects += arch/x64/math.o
 objects += arch/x64/apic.o
 objects += arch/x64/apic-clock.o
@@ -739,6 +777,7 @@ objects += core/chart.o
 objects += core/net_channel.o
 objects += core/demangle.o
 objects += core/async.o
+objects += core/net_trace.o
 
 include $(src)/fs/build.mk
 include $(src)/libc/build.mk
@@ -803,7 +842,6 @@ usr.img: bare.img $(out)/usr.manifest $(out)/cmdline
 osv.vmdk osv.vdi:
 	$(call quiet, echo Creating $@ as $(subst osv.,,$@))
 	$(call quiet, qemu-img convert -O $(subst osv.,,$@) usr.img $@)
-	$(call quiet, $(src)/scripts/imgedit.py setargs $@ "--vga $(shell cat $(out)/cmdline)", IMGEDIT $@)
 .PHONY: osv.vmdk osv.vdi
 
 $(jni): INCLUDES += -I /usr/lib/jvm/java/include -I /usr/lib/jvm/java/include/linux/

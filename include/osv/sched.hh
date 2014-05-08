@@ -476,9 +476,20 @@ private:
     friend void acquire(dummy_lock&) {}
     friend void release(dummy_lock&) {}
     friend void start_early_threads();
-    template <typename T> T& remote_thread_local_var(T& var);
     void* do_remote_thread_local_var(void* var);
     thread_handle handle();
+public:
+    template <typename T>
+    T& remote_thread_local_var(T& var)
+    {
+        return *static_cast<T*>(do_remote_thread_local_var(&var));
+    }
+
+    template <typename T>
+    T* remote_thread_local_ptr(void* var)
+    {
+        return static_cast<T*>(do_remote_thread_local_var(var));
+    }
 private:
     virtual void timer_fired() override;
     struct detached_state;
@@ -572,6 +583,20 @@ public:
     lockless_queue_link<thread> _wakeup_link;
     static unsigned long _s_idgen;
     static thread *find_by_id(unsigned int id);
+
+    static int numthreads();
+    /**
+     * Registers an std::function that will be called when a thread is torn
+     * down.  This is useful, for example, to run code that needs to cleanup
+     * resources acquired by a given thread, about which the thread has no
+     * knowledge about
+     *
+     * In general, this will not run in the same context as the dying thread,
+     * but rather from special scheduler methods. Therefore, one needs to be
+     * careful about stack usage in here. Do not register notifiers that use a
+     * lot of stack
+     */
+    static void register_exit_notifier(std::function<void (thread *)> &&n);
 private:
     class reaper;
     friend class reaper;
@@ -620,6 +645,8 @@ private:
     };
     static callback_dispatch _dispatch;
 };
+
+std::chrono::nanoseconds osv_run_stats();
 
 class thread_runtime_compare {
 public:

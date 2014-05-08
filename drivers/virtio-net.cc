@@ -24,8 +24,8 @@
 #include <osv/debug.h>
 
 #include <osv/sched.hh>
-#include "osv/trace.hh"
-
+#include <osv/trace.hh>
+#include <osv/net_trace.hh>
 
 #include <osv/device.h>
 #include <osv/ioctl.h>

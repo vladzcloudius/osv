@@ -35,6 +35,7 @@
  */
 
 #include <osv/ioctl.h>
+#include <osv/net_trace.hh>
 
 #include <bsd/porting/netport.h>
 #include <bsd/sys/sys/param.h>

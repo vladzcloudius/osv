@@ -9,10 +9,13 @@
 #define  PRIO_HH_
 
 enum class init_prio : int {
-    sort = 101,
+    console = 101,
+    sort,
     cpus,
     fpranges,
+    pt_root,
     mempool,
+    pagecache,
     threadlist,
     pthread,
     notifiers,

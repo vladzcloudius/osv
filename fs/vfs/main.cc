@@ -66,6 +66,11 @@
 #include <algorithm>
 #include <unordered_map>
 
+#include <sys/file.h>
+
+#include "fs/fs.hh"
+#include "libc/libc.hh"
+
 using namespace std;
 
 
@@ -236,6 +241,19 @@ TRACEPOINT(trace_vfs_pread, "%d %p 0x%x 0x%x", int, void*, size_t, off_t);
 TRACEPOINT(trace_vfs_pread_ret, "0x%x", ssize_t);
 TRACEPOINT(trace_vfs_pread_err, "%d", int);
 
+// In BSD's internal implementation of read() and write() code, for example
+// sosend_generic(), a partial read or write returns both an EWOULDBLOCK error
+// *and* a non-zero number of written bytes. In that case, we need to zero the
+// error, so the system call appear a successful partial read/write.
+// In FreeBSD, dofilewrite() and dofileread() (sys_generic.c) do this too.
+static inline bool has_error(int error, int bytes)
+{
+    return error && (
+            (bytes == 0) ||
+            (error != EWOULDBLOCK && error != EINTR && error != ERESTART));
+}
+
+
 ssize_t pread(int fd, void *buf, size_t count, off_t offset)
 {
     trace_vfs_pread(fd, buf, count, offset);
@@ -254,7 +272,7 @@ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
     error = sys_read(fp, &iov, 1, offset, &bytes);
     fdrop(fp);
 
-    if (error)
+    if (has_error(error, bytes))
         goto out_errno;
     trace_vfs_pread_ret(bytes);
     return bytes;
@@ -294,7 +312,7 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
     error = sys_write(fp, &iov, 1, offset, &bytes);
     fdrop(fp);
 
-    if (error)
+    if (has_error(error, bytes))
         goto out_errno;
     trace_vfs_pwrite_ret(bytes);
     return bytes;
@@ -325,7 +343,7 @@ ssize_t preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset)
     error = sys_read(fp, (struct iovec *)iov, iovcnt, offset, &bytes);
     fdrop(fp);
 
-    if (error)
+    if (has_error(error, bytes))
         goto out_errno;
     return bytes;
 
@@ -357,7 +375,7 @@ ssize_t pwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset)
     error = sys_write(fp, (struct iovec *)iov, iovcnt, offset, &bytes);
     fdrop(fp);
 
-    if (error)
+    if (has_error(error, bytes))
         goto out_errno;
     trace_vfs_pwritev_ret(bytes);
     return bytes;
@@ -483,6 +501,26 @@ int fstat(int fd, struct stat *st)
 }
 
 LFS64(fstat);
+
+extern "C" int flock(int fd, int operation)
+{
+    if (!fileref_from_fd(fd)) {
+        return libc_error(EBADF);
+    }
+
+    switch (operation) {
+    case LOCK_SH:
+    case LOCK_SH | LOCK_NB:
+    case LOCK_EX:
+    case LOCK_EX | LOCK_NB:
+    case LOCK_UN:
+        break;
+    default:
+        return libc_error(EINVAL);
+    }
+
+    return 0;
+}
 
 TRACEPOINT(trace_vfs_readdir, "%d %p", int, dirent*);
 TRACEPOINT(trace_vfs_readdir_ret, "");
@@ -690,12 +728,36 @@ TRACEPOINT(trace_vfs_chdir, "\"%s\"", const char*);
 TRACEPOINT(trace_vfs_chdir_ret, "");
 TRACEPOINT(trace_vfs_chdir_err, "%d", int);
 
+static int replace_cwd(struct task *t, struct file *new_cwdfp,
+                       std::function<int (void)> chdir_func)
+{
+    struct file *old = nullptr;
+
+    if (!t) {
+        return 0;
+    }
+
+    if (t->t_cwdfp) {
+        old = t->t_cwdfp;
+    }
+
+    /* Do the actual chdir operation here */
+    int error = chdir_func();
+
+    t->t_cwdfp = new_cwdfp;
+    if (old) {
+        fdrop(old);
+    }
+
+    return error;
+}
+
 int chdir(const char *pathname)
 {
     trace_vfs_chdir(pathname);
     struct task *t = main_task;
     char path[PATH_MAX];
-    struct file *fp, *old = NULL;
+    struct file *fp;
     int error;
 
     error = ENOENT;
@@ -711,13 +773,8 @@ int chdir(const char *pathname)
         goto out_errno;
     }
 
-    if (t->t_cwdfp)
-        old = t->t_cwdfp;
-    t->t_cwdfp = fp;
-    strlcpy(t->t_cwd, path, sizeof(t->t_cwd));
+    replace_cwd(t, fp, [&]() { strlcpy(t->t_cwd, path, sizeof(t->t_cwd)); return 0; });
 
-    if (old)
-        fdrop(old);
     trace_vfs_chdir_ret();
     return 0;
     out_errno:
@@ -734,25 +791,19 @@ int fchdir(int fd)
 {
     trace_vfs_fchdir(fd);
     struct task *t = main_task;
-    struct file *fp, *old = NULL;
+    struct file *fp;
     int error;
 
     error = fget(fd, &fp);
     if (error)
         goto out_errno;
 
-    if (t->t_cwdfp)
-        old = t->t_cwdfp;
-
-    error = sys_fchdir(fp, t->t_cwd);
+    error = replace_cwd(t, fp, [&]() { return sys_fchdir(fp, t->t_cwd); });
     if (error) {
         fdrop(fp);
         goto out_errno;
     }
 
-    t->t_cwdfp = fp;
-    if (old)
-        fdrop(old);
     trace_vfs_fchdir_ret();
     return 0;
 
@@ -1642,6 +1693,14 @@ vfs_init(void)
     if (dup(0) != 2)
         kprintf("failed to dup console (2)\n");
     vfs_initialized = 1;
+}
+
+void vfs_exit(void)
+{
+    /* Free up main_task (stores cwd data) resources */
+    replace_cwd(main_task, nullptr, []() { return 0; });
+    /* Unmount all file systems */
+    unmount_rootfs();
 }
 
 void sys_panic(const char *str)

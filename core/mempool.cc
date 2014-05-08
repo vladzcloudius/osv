@@ -44,6 +44,16 @@ TRACEPOINT(trace_memory_wait, "allocation size=%d", size_t);
 bool smp_allocator = false;
 unsigned char *osv_reclaimer_thread;
 
+// malloc(3) specifies that malloc(), calloc() and realloc() need to return
+// a pointer which "is suitably aligned for any kind of variable.". By "any"
+// variable they actually refer only to standard types, but the longest of
+// these is usually "long double", which is 16 bytes. Glibc's malloc(),
+// with which we intend to be compatible, takes the maximum of 2*sizeof(size_t)
+// and the alignof(long double), so we must do the same.
+static constexpr int MALLOC_ALIGNMENT =
+        (2 * sizeof(size_t) < alignof(long double)) ?
+                alignof(long double) : (2 * sizeof(size_t));
+
 namespace memory {
 
 size_t phys_mem_size;
@@ -436,11 +446,13 @@ static std::atomic<size_t> current_jvm_heap_memory(0);
 // At least two (x86) huge pages worth of size;
 static size_t constexpr min_emergency_pool_size = 4 << 20;
 
-__thread bool allow_emergency_alloc = false;
+__thread unsigned emergency_alloc_level = 0;
+
+reclaimer_lock_type reclaimer_lock;
 
 extern "C" void thread_mark_emergency()
 {
-    allow_emergency_alloc = true;
+    emergency_alloc_level = 1;
 }
 
 reclaimer reclaimer_thread
@@ -524,7 +536,7 @@ void oom()
 
 void reclaimer::wait_for_minimum_memory()
 {
-    if (allow_emergency_alloc) {
+    if (emergency_alloc_level) {
         return;
     }
 
@@ -549,7 +561,7 @@ void reclaimer::wait_for_memory(size_t mem)
     _oom_blocked.wait(mem);
 }
 
-static void* malloc_large(size_t size)
+static void* malloc_large(size_t size, size_t alignment)
 {
     size = (size + page_size - 1) & ~(page_size - 1);
     size += page_size;
@@ -560,13 +572,25 @@ static void* malloc_large(size_t size)
 
             for (auto i = free_page_ranges.begin(); i != free_page_ranges.end(); ++i) {
                 auto header = &*i;
-                page_range* ret_header;
-                if (header->size >= size) {
+
+                char *v = reinterpret_cast<char*>(header);
+                auto expected_ret = v + header->size - size + page_size;
+                auto alignment_shift = expected_ret -
+                        align_down(expected_ret, alignment);
+
+                if (header->size >= size + alignment_shift) {
+                    if (alignment_shift) {
+                        // Leave "alignment_shift" bytes at the end of the
+                        // range free, so our allocation below is aligned.
+                        free_page_ranges.insert(*new(v + header->size -
+                                alignment_shift) page_range(alignment_shift));
+                        header->size -= alignment_shift;
+                    }
+                    page_range* ret_header;
                     if (header->size == size) {
                         free_page_ranges.erase(i);
                         ret_header = header;
                     } else {
-                        void *v = header;
                         header->size -= size;
                         ret_header = new (v + header->size) page_range(size);
                     }
@@ -716,7 +740,7 @@ void reclaimer::_shrinker_loop(size_t target, std::function<bool ()> hard)
 void reclaimer::_do_reclaim()
 {
     ssize_t target;
-    allow_emergency_alloc = true;
+    emergency_alloc_level = 1;
 
     while (true) {
         WITH_LOCK(free_page_ranges_lock) {
@@ -1088,11 +1112,22 @@ extern "C" {
 // allocated from a pool.
 // FIXME: be less wasteful
 
-static inline void* std_malloc(size_t size)
+static inline void* std_malloc(size_t size, size_t alignment)
 {
     if ((ssize_t)size < 0)
         return libc_error_ptr<void *>(ENOMEM);
     void *ret;
+
+    // Currently, we can't allocate a small object with large alignment,
+    // so need to increase the allocation size.
+    if (alignment > size) {
+        if (alignment <= memory::pool::max_object_size) {
+            size = alignment;
+        } else {
+            size = std::max(size, memory::pool::max_object_size * 2);
+        }
+    }
+
     if (size <= memory::pool::max_object_size) {
         if (!smp_allocator) {
             return memory::alloc_page() + memory::non_mempool_obj_offset;
@@ -1101,7 +1136,7 @@ static inline void* std_malloc(size_t size)
         unsigned n = ilog2_roundup(size);
         ret = memory::malloc_pools[n].alloc();
     } else {
-        ret = memory::malloc_large(size);
+        ret = memory::malloc_large(size, alignment);
     }
     memory::tracker_remember(ret, size);
     return ret;
@@ -1191,54 +1226,63 @@ struct header {
 static const size_t pad_before = 2 * mmu::page_size;
 static const size_t pad_after = mmu::page_size;
 
-void* malloc(size_t size)
+void* malloc(size_t size, size_t alignment)
 {
-#ifdef AARCH64_PORT_STUB
-    abort();
-#else /* !AARCH64_PORT_STUB */
     if (!enabled) {
-        return std_malloc(size);
+        return std_malloc(size, alignment);
     }
 
-    auto asize = align_up(size, mmu::page_size);
-    auto padded_size = pad_before + asize + pad_after;
-    void* v = free_area.fetch_add(padded_size, std::memory_order_relaxed);
-    mmu::vpopulate(v, mmu::page_size);
-    new (v) header(size);
-    v += pad_before;
-    mmu::vpopulate(v, asize);
-    memset(v + size, '$', asize - size);
-    // fill the memory with garbage, to catch use-before-init
-    uint8_t garbage = 3;
-    std::generate_n(static_cast<uint8_t*>(v), size, [&] { return garbage++; });
-    return v;
-#endif /* !AARCH64_PORT_STUB */
+    WITH_LOCK(memory::free_page_ranges_lock) {
+        memory::reclaimer_thread.wait_for_minimum_memory();
+    }
+
+    // There will be multiple allocations needed to satisfy this allocation; request
+    // access to the emergency pool to avoid us holding some lock and then waiting
+    // in an internal allocation
+    WITH_LOCK(memory::reclaimer_lock) {
+        auto asize = align_up(size, mmu::page_size);
+        auto padded_size = pad_before + asize + pad_after;
+        if (alignment > mmu::page_size) {
+            // Our allocations are page-aligned - might need more
+            padded_size += alignment - mmu::page_size;
+        }
+        char* v = free_area.fetch_add(padded_size, std::memory_order_relaxed);
+        // change v so that (v + pad_before) is aligned.
+        v += align_up(v + pad_before, alignment) - (v + pad_before);
+        mmu::vpopulate(v, mmu::page_size);
+        new (v) header(size);
+        v += pad_before;
+        mmu::vpopulate(v, asize);
+        memset(v + size, '$', asize - size);
+        // fill the memory with garbage, to catch use-before-init
+        uint8_t garbage = 3;
+        std::generate_n(v, size, [&] { return garbage++; });
+        return v;
+    }
 }
 
 void free(void* v)
 {
-#ifdef AARCH64_PORT_STUB
-    abort();
-#else /* !AARCH64_PORT_STUB */
     if (v < debug_base) {
         return std_free(v);
     }
-    auto h = static_cast<header*>(v - pad_before);
-    auto size = h->size;
-    auto asize = align_up(size, mmu::page_size);
-    char* vv = reinterpret_cast<char*>(v);
-    assert(std::all_of(vv + size, vv + asize, [=](char c) { return c == '$'; }));
-    h->~header();
-    mmu::vdepopulate(h, mmu::page_size);
-    mmu::vdepopulate(v, asize);
-    mmu::vcleanup(h, pad_before + asize);
-#endif /* !AARCH64_PORT_STUB */
+    WITH_LOCK(memory::reclaimer_lock) {
+        auto h = static_cast<header*>(v - pad_before);
+        auto size = h->size;
+        auto asize = align_up(size, mmu::page_size);
+        char* vv = reinterpret_cast<char*>(v);
+        assert(std::all_of(vv + size, vv + asize, [=](char c) { return c == '$'; }));
+        h->~header();
+        mmu::vdepopulate(h, mmu::page_size);
+        mmu::vdepopulate(v, asize);
+        mmu::vcleanup(h, pad_before + asize);
+    }
 }
 
 void* realloc(void* v, size_t size)
 {
     if (!v)
-        return malloc(size);
+        return malloc(size, MALLOC_ALIGNMENT);
     if (!size) {
         free(v);
         return nullptr;
@@ -1246,7 +1290,7 @@ void* realloc(void* v, size_t size)
     auto h = static_cast<header*>(v - pad_before);
     if (h->size >= size)
         return v;
-    void* n = malloc(size);
+    void* n = malloc(size, MALLOC_ALIGNMENT);
     if (!n)
         return nullptr;
     memcpy(n, v, h->size);
@@ -1259,9 +1303,9 @@ void* realloc(void* v, size_t size)
 void* malloc(size_t size)
 {
 #if CONF_debug_memory == 0
-    void* buf = std_malloc(size);
+    void* buf = std_malloc(size, MALLOC_ALIGNMENT);
 #else
-    void* buf = dbg::malloc(size);
+    void* buf = dbg::malloc(size, MALLOC_ALIGNMENT);
 #endif
 
     trace_memory_malloc(buf, size);
@@ -1307,7 +1351,11 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
     if (!is_power_of_two(alignment)) {
         return EINVAL;
     }
-    void *ret = malloc(size);
+#if CONF_debug_memory == 0
+    void* ret = std_malloc(size, alignment);
+#else
+    void* ret = dbg::malloc(size, alignment);
+#endif
     if (!ret) {
         return ENOMEM;
     }
@@ -1341,12 +1389,12 @@ void enable_debug_allocator()
 
 void* alloc_phys_contiguous_aligned(size_t size, size_t align)
 {
-    assert(align <= page_size); // implementation limitation
     assert(is_power_of_two(align));
-    // make use of the standard allocator returning page-aligned
+    // make use of the standard allocator returning properly aligned
     // physically contiguous memory:
-    size = std::max(page_size, size);
-    return std_malloc(size);
+    auto ret = std_malloc(size, align);
+    assert (!(reinterpret_cast<uintptr_t>(ret) & (align - 1)));
+    return ret;
 }
 
 void free_phys_contiguous_aligned(void* p)

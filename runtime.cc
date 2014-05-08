@@ -56,6 +56,9 @@
 #include <osv/execinfo.hh>
 #include <osv/demangle.hh>
 #include <processor.hh>
+#include <grp.h>
+#include <unordered_map>
+#include <api/sys/prctl.h>
 
 #define __LC_LAST 13
 
@@ -93,7 +96,8 @@ static void print_backtrace(void)
 
     /* Skip abort(const char *) and abort(void)  */
     for (int i = 2; i < len; i++) {
-        auto ei = elf::get_program()->lookup_addr(addrs[i]);
+        auto addr = addrs[i] - 1;
+        auto ei = elf::get_program()->lookup_addr(addr);
         const char *sname = ei.sym;
         char demangled[1024];
 
@@ -103,8 +107,8 @@ static void print_backtrace(void)
             sname = demangled;
 
         debug_ll("%p <%s+%d>\n",
-            addrs[i], sname,
-            reinterpret_cast<uintptr_t>(addrs[i])
+            addr, sname,
+            reinterpret_cast<uintptr_t>(addr)
             - reinterpret_cast<uintptr_t>(ei.addr));
     }
 }
@@ -228,6 +232,13 @@ int posix_fadvise(int fd, off_t offset, off_t len, int advice)
         return EINVAL;
     }
 }
+LFS64(posix_fadvise);
+
+int posix_fallocate(int fd, off_t offset, off_t len)
+{
+    return ENOSYS;
+}
+LFS64(posix_fallocate);
 
 int getpid()
 {
@@ -362,6 +373,13 @@ void exit(int status)
     osv::shutdown();
 }
 
+// "The function _exit() is like exit(3), but does not call any functions
+// registered with atexit(3) or on_exit(3)."
+//
+// Since we do nothing for those anyway, they are equal.
+void _exit(int status) __attribute((alias("exit")));
+void _Exit(int status) __attribute((alias("exit")));
+
 int atexit(void (*func)())
 {
     // nothing to do
@@ -461,4 +479,38 @@ int setpriority(int which, int id, int prio)
     float p = expf(prio_k * prio);
     th->set_priority(p);
     return 0;
+}
+
+//man getgrnam: "The return value may point to a static area, and may be
+//overwritten by subsequent calls to getgrent(3), getgrgid(), or getgrnam().
+//(Do not pass the returned pointer to free(3).)"
+//
+//OSv will recognize a few groups - as of right now, just nobody. For the
+//others we will return a NULL structure, signalling an error
+std::unordered_map<std::string, struct group> osv_groups  = { { "nobody", { (char *)"nobody", (char *)"", 0, nullptr } } };
+
+struct group *getgrnam(const char *name)
+{
+    auto it = osv_groups.find(name);
+
+    if (it == osv_groups.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+int initgroups(const char *user, gid_t group)
+{
+    WARN_STUBBED();
+    return -1;
+}
+
+int prctl(int option, ...)
+{
+    switch (option) {
+    case PR_SET_DUMPABLE:
+        return 0;
+    }
+    errno = EINVAL;
+    return -1;
 }

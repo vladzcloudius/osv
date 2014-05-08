@@ -10,6 +10,7 @@
 
 #include <sys/cdefs.h>
 #include <sys/types.h>
+#include <stdbool.h>
 
 typedef void *vm_page_t;
 typedef uint64_t vm_paddr_t;
@@ -50,7 +51,8 @@ uint64_t kmem_used(void);
 int vm_paging_needed(void);
 int vm_throttling_needed(void);
 
-void mmu_unmap(void *addr, size_t size);
+void mmu_unmap(void* ab);
+void mmu_map(void* key, void* ab, void* page);
 
 #define vtophys(_va) virt_to_phys((void *)_va)
 __END_DECLS

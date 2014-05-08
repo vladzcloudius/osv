@@ -15,6 +15,7 @@
 #include <osv/preempt-lock.hh>
 #include <osv/migration-lock.hh>
 #include <osv/wait_record.hh>
+#include <osv/mempool.hh>
 
 namespace osv {
 
@@ -39,6 +40,7 @@ public:
     void request(uint64_t generation);
     bool check(uint64_t generation);
 private:
+    void do_work();
     void work();
     void set_generation(uint64_t generation);
 private:
@@ -107,6 +109,13 @@ bool all_at_generation(decltype(cpu_quiescent_state_threads)& cqsts,
 
 void cpu_quiescent_state_thread::work()
 {
+    WITH_LOCK(memory::reclaimer_lock) {
+        do_work();
+    }
+}
+
+void cpu_quiescent_state_thread::do_work()
+{
     while (true) {
         bool toclean = false;
         WITH_LOCK(preempt_lock) {
@@ -161,6 +170,7 @@ void cpu_quiescent_state_thread::work()
             p->ncallbacks[b] = 0;
             for (unsigned i = 0; i < ncallbacks; i++) {
                 (callbacks[i])();
+                callbacks[i] = nullptr;
             }
         } else {
             // Wait until we have a generation request from another CPU who
@@ -216,6 +226,28 @@ void rcu_synchronize()
         (*percpu_quiescent_state_thread).wake();
     }
     s.wait();
+}
+
+/// Ensure that all queued rcu callbacks are executed.
+/// This function provides a barrier that ensures that all callbacks previously enqueued
+/// with rcu_defer() have completed execution.  This is useful if some data that they
+/// depend on is going away.
+/// Use this only as a last resort -- usually a reference count on the object that can
+/// go away is preferable.
+void rcu_flush()
+{
+    semaphore s{0};
+    for (auto c : sched::cpus) {
+        sched::thread t([&] {
+            rcu_defer([&] { s.post(); });
+            // rcu_defer() might not wake the cleanup thread until enough deferred
+            // callbacks have accumulated, so wake it up now.
+            percpu_quiescent_state_thread->wake();
+        }, sched::thread::attr().pin(c));
+        t.start();
+        t.join();
+    }
+    s.wait(sched::cpus.size());
 }
 
 }

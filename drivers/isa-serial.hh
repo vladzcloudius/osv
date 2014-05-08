@@ -8,23 +8,23 @@
 #ifndef DRIVERS_ISA_SERIAL_HH
 #define DRIVERS_ISA_SERIAL_HH
 
-#include "console.hh"
+#include "console-driver.hh"
 #include "drivers/pci.hh"
 #include <osv/sched.hh>
 #include <osv/interrupt.hh>
-#include <termios.h>
 
-class IsaSerialConsole : public Console {
+namespace console {
+
+class IsaSerialConsole : public ConsoleDriver {
 public:
-    explicit IsaSerialConsole(sched::thread* consumer, const termios *tio);
     virtual void write(const char *str, size_t len);
+    virtual void flush() {}
     virtual bool input_ready() override;
     virtual char readch();
 private:
-    gsi_edge_interrupt _irq;
+    gsi_edge_interrupt* _irq;
     static const u16 ioport = 0x3f8;
     u8 lcr;
-    const termios *_tio;
 
     enum IsaSerialValues {
         // UART registers, offsets to ioport:
@@ -58,8 +58,12 @@ private:
         MCR_LOOPBACK_MODE = 0x16,
     };
 
+    virtual void dev_start();
     void reset();
-    void writeByte(const char letter);
+    static void writeByte(const char letter);
+    virtual const char *thread_name() { return "isa-serial-input"; }
 };
+
+}
 
 #endif

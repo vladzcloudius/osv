@@ -23,15 +23,12 @@ tracepointv<10002, decltype(test_object::unpack), test_object::unpack>
     trace_2("tp2", "%d %d");
 tracepoint<10003, const char*, long, const char*> trace_string("tp3", "%s %d %s");
 
+tracepoint<10004, int, int, int, int, int, int, int, int, int>
+trace_with_nine_args("tp4", "%d %d %d %d %d %d %d %d %d");
 
-std::string signature_string(u64 s)
+std::string signature_string(const char* s)
 {
-    std::string ret;
-    while (s) {
-        ret.push_back(s & 255);
-        s >>= 8;
-    }
-    return ret;
+    return s;
 }
 
 int main(int ac, char** av)
@@ -44,10 +41,12 @@ int main(int ac, char** av)
         u32 a0;
         s64 a1;
     } tmp = {};
-    trace_1.serialize(&tmp, std::make_tuple(u32(10), s64(20)));
-    auto size = trace_1.size();
+    auto args = std::make_tuple(u32(10), s64(20));
+    trace_1.serialize(&tmp, args);
+    auto size = trace_1.size(args);
     assert(size == 16 && tmp.a0 == 10 && tmp.a1 == 20);
     trace_2(obj);
     trace_string("foo", 6, "bar");
-}
 
+    assert(signature_string(trace_with_nine_args.signature()) == "iiiiiiiii");
+}

@@ -1,6 +1,7 @@
 import sys
 from operator import attrgetter
 from osv import trace, tree, debug
+import itertools
 
 class ProfNode(tree.TreeNode):
     def __init__(self, key):
@@ -66,7 +67,8 @@ unimportant_functions = set([
     'std::function<void ()>::operator()() const',
     'tracepoint_base::do_log_backtrace',
     'tracepoint_base::log_backtrace(trace_record*, unsigned char*&)',
-    'tracepoint_base::do_log_backtrace(trace_record*, unsigned char*&)'
+    'tracepoint_base::do_log_backtrace(trace_record*, unsigned char*&)',
+    '_M_invoke',
     ])
 
 bottom_of_stack = set(['thread_main', 'thread_main_c'])
@@ -171,7 +173,7 @@ def print_profile(samples, symbol_resolver, caller_oriented=False,
             if not sample:
                 continue
 
-        frames = [symbol_resolver(addr - 1) for addr in sample.backtrace]
+        frames = list(debug.resolve_all(symbol_resolver, (addr - 1 for addr in sample.backtrace)))
         frames = strip_garbage(frames)
         if caller_oriented:
             frames.reverse()

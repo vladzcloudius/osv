@@ -49,6 +49,22 @@ inline void halt_no_interrupts() {
         wfi();
     }
 }
+inline u64 read_ttbr0() {
+    u64 val;
+    asm volatile("mrs %0, ttbr0_el1; isb;" : "=r"(val) :: "memory");
+    return val;
+}
+inline void write_ttbr0(u64 val) {
+    asm volatile("msr ttbr0_el1, %0; isb;" :: "r"(val) : "memory");
+}
+inline u64 read_ttbr1() {
+    u64 val;
+    asm volatile("mrs %0, ttbr1_el1; isb;" : "=r"(val) :: "memory");
+    return val;
+}
+inline void write_ttbr1(u64 val) {
+    asm volatile("msr ttbr1_el1, %0; isb;" :: "r"(val) : "memory");
+}
 
 inline u64 ticks()
 {
@@ -58,8 +74,8 @@ inline u64 ticks()
 
 struct fpu_state {
     __uint128_t vregs[32];
-    unsigned long fpsr;
-    unsigned long fpcr;
+    u32 fpsr;
+    u32 fpcr;
 };
 
 inline void fpu_state_save(fpu_state *s)

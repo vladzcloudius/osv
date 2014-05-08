@@ -4,23 +4,23 @@
 	ignore = dirty
 [submodule "external/x64/gcc.bin"]
 	path = external/x64/gcc.bin
-	url = ../../cloudius-systems/gcc.bin
+	url = https://github.com/cloudius-systems/gcc.bin
 	ignore = dirty
 [submodule "external/x64/glibc.bin"]
 	path = external/x64/glibc.bin
-	url = ../../cloudius-systems/glibc.bin
+	url = https://github.com/cloudius-systems/glibc.bin
 	ignore = dirty
 [submodule "external/x64/glibc-testsuite"]
 	path = external/x64/glibc-testsuite
-	url = ../../cloudius-systems/glibc-testsuite
+	url = https://github.com/cloudius-systems/glibc-testsuite
 	ignore = dirty
 [submodule "external/x64/acpica"]
 	path = external/x64/acpica
-	url = ../../cloudius-systems/acpica
+	url = https://github.com/cloudius-systems/acpica
 	ignore = dirty
 [submodule "external/x64/misc.bin"]
 	path = external/x64/misc.bin
-	url = ../../cloudius-systems/misc.bin.git
+	url = https://github.com/cloudius-systems/misc.bin.git
 	ignore = dirty
 [submodule "mgmt"]
 	path = mgmt
@@ -30,3 +30,21 @@
 	path = apps
 	url = ../../cloudius-systems/osv-apps
 	ignore = dirty
+[submodule "external/acpica"]
+	path = external/acpica
+	url = https://github.com/cloudius-systems/acpica
+[submodule "external/gcc.bin"]
+	path = external/gcc.bin
+	url = https://github.com/cloudius-systems/gcc.bin
+[submodule "external/glibc-testsuite"]
+	path = external/glibc-testsuite
+	url = https://github.com/cloudius-systems/glibc-testsuite
+[submodule "external/glibc.bin"]
+	path = external/glibc.bin
+	url = https://github.com/cloudius-systems/glibc.bin
+[submodule "external/libunwind"]
+	path = external/libunwind
+	url = https://github.com/cloudius-systems/libunwind
+[submodule "external/misc.bin"]
+	path = external/misc.bin
+	url = https://github.com/cloudius-systems/misc.bin.git

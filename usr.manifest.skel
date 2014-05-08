@@ -2,9 +2,9 @@
 /usr/lib/libgcc_s.so.1: %(gccbase)s/lib64/libgcc_s.so.1
 /usr/lib/&/libboost_filesystem-mt.so.1.53.0: %(miscbase)s/usr/lib64/&
 /&/etc/hosts: ../../static/&
-/tools/netserver-osv: /home/vladz/Downloads/netperf-2.6.0/src/netserver
-/tools/netperf-osv: /home/vladz/Downloads/netperf-2.6.0/src/netperf
-/tools/netperf3-osv: /home/vladz/Downloads/netperf3/netperf3
+#/tools/netserver-osv: /home/vladz/Downloads/netperf-2.6.0/src/netserver
+#/tools/netperf-osv: /home/vladz/Downloads/netperf-2.6.0/src/netperf
+#/tools/netperf3-osv: /home/vladz/Downloads/netperf3/netperf3
 /etc/mnttab: /dev/null
 /dev: ../../static
 /proc: ../../static

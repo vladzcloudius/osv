@@ -397,7 +397,7 @@ struct inpcbgroup {
 	mutex_init(&(inp)->inp_lock)
 #define INP_LOCK_DESTROY(inp)	mutex_destroy(&(inp)->inp_lock)
 #define INP_LOCK(inp)		mutex_lock(&(inp)->inp_lock)
-#define INP_TRY_LOCK(inp)	mutex_try_lock(&(inp)->inp_lock)
+#define INP_TRY_LOCK(inp)	mutex_trylock(&(inp)->inp_lock)
 #define INP_UNLOCK(inp)		mutex_unlock(&(inp)->inp_lock)
 #define	INP_LOCKED(inp)		mutex_owned(&(inp)->inp_lock)
 #define	INP_LOCK_ASSERT(inp)	assert(mutex_owned(&(inp)->inp_lock))

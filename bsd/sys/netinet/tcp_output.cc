@@ -91,7 +91,7 @@ SYSCTL_VNET_INT(_net_inet_tcp, OID_AUTO, path_mtu_discovery, CTLFLAG_RW,
 	&VNET_NAME(path_mtu_discovery), 1,
 	"Enable Path MTU Discovery");
 
-VNET_DEFINE(int, ss_fltsz) = 1;
+VNET_DEFINE(int, ss_fltsz) = 10;
 SYSCTL_VNET_INT(_net_inet_tcp, OID_AUTO, slowstart_flightsize, CTLFLAG_RW,
 	&VNET_NAME(ss_fltsz), 1,
 	"Slow start flight size");

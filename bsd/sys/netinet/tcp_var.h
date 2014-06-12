@@ -146,7 +146,7 @@ public:
 
 	u_long	snd_wnd;		/* send window */
 	u_long	snd_cwnd;		/* congestion-controlled window */
-	u_long	snd_spare1;		/* unused */
+	u_long	snd_init_cwnd;	/* initial cwnd value */
 	u_long	snd_ssthresh;		/* snd_cwnd size threshold for
 					 * for slow start exponential to
 					 * linear switch

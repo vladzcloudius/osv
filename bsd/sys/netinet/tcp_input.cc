@@ -106,6 +106,8 @@
 #include <osv/poll.h>
 #include <osv/net_trace.hh>
 
+TRACEPOINT(trace_tcp_input_ack, "%p: We've got ACK: %u", void*, unsigned int);
+
 const int tcprexmtthresh = 3;
 
 VNET_DEFINE(struct tcpstat, tcpstat);
@@ -1690,7 +1692,8 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				cc_ack_received(tp, th, CC_ACK);
 
 				tp->snd_una = th->th_ack;
-				/*
+
+                /*
 				 * Pull snd_wl2 up to prevent seq wrap relative
 				 * to th_ack.
 				 */
@@ -2376,7 +2379,9 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	case TCPS_FIN_WAIT_2:
 	case TCPS_CLOSE_WAIT:
 	case TCPS_CLOSING:
-	case TCPS_LAST_ACK:
+    case TCPS_LAST_ACK:
+		trace_tcp_input_ack(tp, th->th_ack.raw());
+
 		if (th->th_ack > tp->snd_max) {
 			TCPSTAT_INC(tcps_rcvacktoomuch);
 			goto dropafterack;

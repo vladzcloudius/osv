@@ -1332,7 +1332,8 @@ out:
                     trace_tcp_output_resched_end();
             }
 
-            tp->snd_cwnd = tp->t_maxseg;
+            tp->snd_cwnd = bsd_max(tp->t_maxseg, tp->snd_cwnd/2);
+
 			return (0);
 		case EMSGSIZE:
 			/*

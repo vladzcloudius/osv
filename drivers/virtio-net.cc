@@ -45,7 +45,10 @@ TRACEPOINT(trace_virtio_net_fill_rx_ring, "if=%d", int);
 TRACEPOINT(trace_virtio_net_fill_rx_ring_added, "if=%d, added=%d", int, int);
 TRACEPOINT(trace_virtio_net_tx_packet, "if=%d, len=%d", int, int);
 TRACEPOINT(trace_virtio_net_tx_failed_add_buf, "if=%d", int);
-TRACEPOINT(trace_virtio_net_tx_no_space_calling_gc, "if=%d", int);
+TRACEPOINT(trace_virtio_net_tx_no_space_calling_gc, "vec_sz=%d", int);
+TRACEPOINT(trace_virtio_net_tx_fast, "Send in a fast hook: %d", int);
+TRACEPOINT(trace_virtio_net_tx_start_waiting, "Start waiting");
+TRACEPOINT(trace_virtio_net_tx_start_handling, "Start handling");
 using namespace memory;
 
 // TODO list
@@ -609,6 +612,8 @@ inline int net::txq::try_xmit_one_locked(void* _req)
         return rc;
     }
 
+    trace_virtio_net_tx_fast(req->tx_bytes);
+
     update_stats(req);
     return 0;
 }
@@ -663,7 +668,7 @@ int net::txq::try_xmit_one_locked(net_req* req)
 
     if (!vqueue->avail_ring_has_room(vec_sz)) {
         if (vqueue->used_ring_not_empty()) {
-            trace_virtio_net_tx_no_space_calling_gc(_parent->_ifn->if_index);
+            trace_virtio_net_tx_no_space_calling_gc(vec_sz);
             gc();
             if (!vqueue->avail_ring_has_room(vec_sz)) {
                 return ENOBUFS;
@@ -697,11 +702,14 @@ void net::txq::xmit_one_locked(void* _req)
 {
     net_req* req = static_cast<net_req*>(_req);
 
+    trace_virtio_net_tx_start_handling();
+
     if (try_xmit_one_locked(req)) {
         do {
             // We are going to poll - flush the pending packets
             kick_pending();
             if (!vqueue->used_ring_not_empty()) {
+                trace_virtio_net_tx_start_waiting();
                 do {
                     sched::thread::yield();
                 } while (!vqueue->used_ring_not_empty());

@@ -307,7 +307,7 @@ net::net(pci::device& dev)
     //  - If there is no more free descriptors in the pool above - allocate like
     //    we do today.
     //
-    _txq.vqueue->set_use_indirect(true);
+    //_txq.vqueue->set_use_indirect(true);
 
     //Start the polling thread before attaching it to the Rx interrupt
     poll_task->start();

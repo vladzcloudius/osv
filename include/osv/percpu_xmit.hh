@@ -431,7 +431,7 @@ private:
         return _check_empty_queues.exchange(true, std::memory_order_acq_rel);
     }
     void clear_pending() {
-        _check_empty_queues.store(false, std::memory_order_release);
+        _check_empty_queues.store(false, std::memory_order_seq_cst);
     }
 
 private:

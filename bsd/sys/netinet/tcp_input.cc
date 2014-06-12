@@ -336,9 +336,11 @@ cc_conn_init(struct tcpcb *tp)
 		    bsd_min(tp->snd_wnd, so->so_snd.sb_hiwat)));
 	else
 #endif
-	if (V_tcp_do_rfc3390)
-		tp->snd_cwnd = bsd_min(4 * tp->t_maxseg,
-		    bsd_max(2 * tp->t_maxseg, 4380));
+	if (V_tcp_do_rfc3390) {
+		tp->snd_init_cwnd = bsd_min(V_ss_fltsz * tp->t_maxseg,
+                                    tp->t_inpcb->inp_socket->so_snd.sb_mbmax);
+        tp->snd_cwnd = tp->snd_init_cwnd;
+    }
 #ifdef INET6
 	else if (isipv6 && in6_localaddr(&inp->in6p_faddr))
 		tp->snd_cwnd = tp->t_maxseg * V_ss_fltsz_local;
@@ -385,7 +387,7 @@ cc_cong_signal(struct tcpcb *tp, struct tcphdr *th, uint32_t type)
 		EXIT_RECOVERY(tp->t_flags);
 		tp->snd_ssthresh = bsd_max(2, bsd_min(tp->snd_wnd, tp->snd_cwnd) / 2 /
 		    tp->t_maxseg) * tp->t_maxseg;
-		tp->snd_cwnd = tp->t_maxseg;
+		tp->snd_cwnd = tp->snd_init_cwnd;
 		break;
 	case CC_RTO_ERR:
 		TCPSTAT_INC(tcps_sndrexmitbad);
@@ -2478,12 +2480,12 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 						TCPSTAT_INC(
 						    tcps_sack_recovery_episode);
 						tp->sack_newdata = tp->snd_nxt;
-						tp->snd_cwnd = tp->t_maxseg;
+						tp->snd_cwnd = tp->snd_init_cwnd;
 						(void) tcp_output(tp);
 						goto drop;
 					}
 					tp->snd_nxt = th->th_ack;
-					tp->snd_cwnd = tp->t_maxseg;
+					tp->snd_cwnd = tp->snd_init_cwnd;
 					(void) tcp_output(tp);
 					KASSERT(tp->snd_limited <= 2,
 					    ("%s: tp->snd_limited too big",

@@ -145,23 +145,20 @@ inline int net::txq::xmit(mbuf* buff)
 
 inline bool net::txq::kick_hw()
 {
+    bool kicked = vqueue->kick();
 #ifdef DEBUG_VIRTIO_TX
-    if (vqueue->kick()) {
-        stats.tx_kicks++;
-        return true;
-    }
+    stats.tx_kicks += !!kicked;
 
-    return false;
-#else
-    return vqueue->kick();
 #endif
+
+    return kicked;
 }
 
 inline void net::txq::kick_pending(u16 thresh)
 {
     if (_pkts_to_kick >= thresh) {
         _pkts_to_kick = 0;
-        kick_hw();
+        stats.tx_worker_kicks += !!kick_hw();
     }
 }
 
@@ -220,9 +217,9 @@ void net::fill_qstats(const struct txq& txq,
     printf("packet(%d)/kick(%d) %.2f\n",
            txq.stats.tx_packets, txq.stats.tx_kicks,
            double(txq.stats.tx_packets)/txq.stats.tx_kicks);
-    printf("worker packet(%d)/kick(%d) %.2f\n",
-           txq.stats.tx_worker_packets, txq.stats.tx_kicks,
-           double(txq.stats.tx_worker_packets)/txq.stats.tx_kicks);
+    printf("worker packet(%d)/worker_kick(%d) %.2f\n",
+           txq.stats.tx_worker_packets, txq.stats.tx_worker_kicks,
+           double(txq.stats.tx_worker_packets)/txq.stats.tx_worker_kicks);
     printf("worker packet(%d)/worker wakeup(%d) %.2f\n",
            txq.stats.tx_worker_packets, txq.stats.tx_worker_wakeups,
            double(txq.stats.tx_worker_packets)/txq.stats.tx_worker_wakeups);

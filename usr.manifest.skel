@@ -8,3 +8,4 @@
 /proc: ../../static
 /tmp: ../../static
 /tools/netperf-osv: /home/vladz/Downloads/netperf-2.6.0/src/netperf
+/tools/iperf: /home/vladz/work/osv/apps/iperf/iperf

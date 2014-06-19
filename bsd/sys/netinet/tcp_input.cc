@@ -106,6 +106,8 @@
 #include <osv/poll.h>
 #include <osv/net_trace.hh>
 
+TRACEPOINT(trace_tcp_input_ack, "%p: We've got ACK: %u", void*, unsigned int);
+
 const int tcprexmtthresh = 3;
 
 VNET_DEFINE(struct tcpstat, tcpstat);
@@ -3662,6 +3664,7 @@ tcp_net_channel_packet(tcpcb* tp, mbuf* m)
 	h += th->th_off << 2;
 	auto drop_hdrlen = h - start;
 	tcp_fields_to_host(th);
+    trace_tcp_input_ack(tp, th->th_ack.raw());
 	auto so = tp->t_inpcb->inp_socket;
 	auto tlen = ntohs(ip_hdr->ip_len) - (ip_size + (th->th_off << 2));
 	auto iptos = ip_hdr->ip_tos;

@@ -704,8 +704,8 @@ void net::txq::xmit_one_locked(void* _req)
     update_stats(req);
 
     //
-    // It was a good packet - increase the counter of a "pending for a kick"
-    // packets.
+    // The packet has been posted - increase a "pending for a kick" packets
+    // counter.
     //
     _pkts_to_kick++;
 }

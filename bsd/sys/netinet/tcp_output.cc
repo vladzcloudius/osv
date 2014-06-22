@@ -472,15 +472,19 @@ after_sack_rexmit:
 	 */
 	ipsec_optlen = ipsec_hdrsiz_tcp(tp);
 #endif
-	if ((tp->t_flags & TF_TSO) && V_tcp_do_tso && len > tp->t_maxseg &&
+	bool tso_capable = false;
+	if ((tp->t_flags & TF_TSO) && V_tcp_do_tso &&
 	    ((tp->t_flags & TF_SIGNATURE) == 0) &&
 	    tp->rcv_numsacks == 0 && sack_rxmit == 0 &&
 #ifdef IPSEC
 	    ipsec_optlen == 0 &&
 #endif
 	    tp->t_inpcb->inp_options == NULL &&
-	    tp->t_inpcb->in6p_options == NULL)
-		tso = 1;
+	    tp->t_inpcb->in6p_options == NULL) {
+		tso_capable = true;
+	}
+
+    tso = !!(tso_capable && len > tp->t_maxseg);
 
 	if (sack_rxmit) {
 		if (p->rxmit + len < tp->snd_una + so->so_snd.sb_cc)
@@ -505,10 +509,17 @@ after_sack_rexmit:
 	 *	- we need to retransmit
 	 */
 	if (len) {
-		if (len >= tp->t_maxseg) {
-            trace_tcp_output_ret(tp->t_maxseg);
-			goto send;
+        u_int send_thresh = tp->t_maxseg;
+
+        if (tso_capable) {
+            send_thresh = bsd_min(IP_MAXPACKET, sendwin);
         }
+
+        if (len >= send_thresh) {
+            trace_tcp_output_ret(5);
+            goto send;
+        }
+
 		/*
 		 * NOTE! on localhost connections an 'ack' from the remote
 		 * end may occur synchronously with the output and cause

@@ -75,6 +75,12 @@
 
 #include <machine/in_cksum.h>
 
+TRACEPOINT(trace_tso_flush_sched, "");
+TRACEPOINT(trace_tso_flush_cancel, "");
+TRACEPOINT(trace_tso_flush_fire,
+		"Going to send %d bytes, off %d, sendwin %d sb_cc "
+		"%d cur_seq %u", int, int, int, int, unsigned int);
+
 VNET_DEFINE(int, path_mtu_discovery) = 1;
 SYSCTL_VNET_INT(_net_inet_tcp, OID_AUTO, path_mtu_discovery, CTLFLAG_RW,
 	&VNET_NAME(path_mtu_discovery), 1,
@@ -126,6 +132,14 @@ cc_after_idle(struct tcpcb *tp)
 
 	if (CC_ALGO(tp)->after_idle != NULL)
 		CC_ALGO(tp)->after_idle(tp->ccv);
+}
+
+static inline void cancel_tso_flush_timer(struct tcpcb *tp)
+{
+	if (tcp_timer_active(tp, TT_TSO_FLUSH)) {
+		trace_tso_flush_cancel();
+		tcp_timer_activate(tp, TT_TSO_FLUSH, 0);
+	}
 }
 
 /*
@@ -495,6 +509,16 @@ after_sack_rexmit:
 
 		if (len >= send_thresh) {
 			goto send;
+		} else if (tp->t_flags & TF_TSO_NOW) {
+			tp->t_flags &= ~((u_int)TF_TSO_NOW);
+			trace_tso_flush_fire(len, off, sendwin,
+					     so->so_snd.sb_cc,
+					     tp->snd_nxt.raw() + len);
+			goto send;
+		} else if (!tcp_timer_active(tp, TT_TSO_FLUSH)) {
+			trace_tso_flush_sched();
+			// Defer sending for no longer than 2 ticks
+			tcp_timer_activate(tp, TT_TSO_FLUSH, 1);
 		}
 
 		/*
@@ -1208,6 +1232,9 @@ timer:
 		 */
 		ip6->ip6_hlim = in6_selecthlim(tp->t_inpcb, NULL);
 
+		// We are about to send the frame - cancel the TSO_FLUSH timer
+		cancel_tso_flush_timer(tp);
+
 		/* TODO: IPv6 IP6TOS_ECT bit on */
 		error = ip6_output(m, tp->t_inpcb->in6p_outputopts, &ro,
 		    ((so->so_options & SO_DONTROUTE) ?  IP_ROUTETOIF : 0),
@@ -1241,6 +1268,9 @@ timer:
 	 */
 	if (V_path_mtu_discovery && tp->t_maxopd > V_tcp_minmss)
 		ip->ip_off |= IP_DF;
+
+	// We are about to send the frame - cancel the TSO_FLUSH timer
+	cancel_tso_flush_timer(tp);
 
 	error = ip_output(m, tp->t_inpcb->inp_options, &ro,
 	    ((so->so_options & SO_DONTROUTE) ? IP_ROUTETOIF : 0), 0,

@@ -75,6 +75,10 @@
 
 #include <machine/in_cksum.h>
 
+TRACEPOINT(trace_tso_flush_sched, "");
+TRACEPOINT(trace_tso_flush_cancel, "");
+TRACEPOINT(trace_tso_flush_fire, "Going to send %d bytes", int);
+
 VNET_DEFINE(int, path_mtu_discovery) = 1;
 SYSCTL_VNET_INT(_net_inet_tcp, OID_AUTO, path_mtu_discovery, CTLFLAG_RW,
 	&VNET_NAME(path_mtu_discovery), 1,
@@ -126,6 +130,71 @@ cc_after_idle(struct tcpcb *tp)
 
 	if (CC_ALGO(tp)->after_idle != NULL)
 		CC_ALGO(tp)->after_idle(tp->ccv);
+}
+
+static inline void tcp_cancel_tso_flush_timer(struct tcpcb *tp)
+{
+	//
+	// Don't actually "cancel" the timer, just make it do nothing when it
+	// fires.
+	//
+	tp->t_flags &= ~((u_int)TF_TSO_NOW);
+	tp->t_flags &= ~((u_int)TF_TSO_PENDING);
+}
+
+/**
+ * Check if the TSO aggregation should be closed
+ *
+ * @param tp TCP context handle
+ * @param len pending data length
+ * @param sendwin available Tx window
+ *
+ * @return TRUE if data should be sent, FALSE otherwise
+ * @note Should be called only if there is a TSO aggregation pending:
+ *
+ *		len > tp->t_maxseg
+ */
+static inline bool tcp_tso_send_now(struct tcpcb *tp, long len,
+				    long sendwin)
+{
+	DEBUG_ASSERT(len > tp->t_maxseg, "Called for non-TSO case");
+
+	// TSO_FLUSH fired - send!
+	if (tp->t_flags & TF_TSO_NOW) {
+		trace_tso_flush_fire(len);
+		return true;
+	}
+
+	//
+	// Send if there is the whole Tx window (but not less than MSS in order
+	// not to break the SWS) or IP_MAXPACKET of data.
+	//
+	// We want to let the Tx window grow as fast as possible on the
+	// one hand and aggregate as many bytes as possible in a single TSO
+	// aggregation on the other. Therefore we will limit the aggregation by
+	// the window size as long as the window is small and when it grows
+	// we'll start aggregating the full TSO frames.
+	//
+	u_int send_thresh = bsd_min(IP_MAXPACKET,
+				    bsd_max(sendwin, tp->t_maxseg));
+
+	if (len >= send_thresh) {
+		return true;
+	}
+
+	//
+	// Start the TSO_FLUSH timer only if more than MSS is pending in order
+	// not to break the SWS avoidance algorithm.
+	//
+	if (!(tp->t_flags & TF_TSO_PENDING)) {
+		trace_tso_flush_sched();
+		tp->t_flags |= TF_TSO_PENDING;
+		// Defer sending for no longer than 2 ticks
+		tcp_timer_activate(tp, TT_TSO_FLUSH, 2);
+
+	}
+
+	return false;
 }
 
 /*
@@ -450,15 +519,19 @@ after_sack_rexmit:
 	 */
 	ipsec_optlen = ipsec_hdrsiz_tcp(tp);
 #endif
-	if ((tp->t_flags & TF_TSO) && V_tcp_do_tso && len > tp->t_maxseg &&
+	bool tso_capable = false;
+	if ((tp->t_flags & TF_TSO) && V_tcp_do_tso &&
 	    ((tp->t_flags & TF_SIGNATURE) == 0) &&
 	    tp->rcv_numsacks == 0 && sack_rxmit == 0 &&
 #ifdef IPSEC
 	    ipsec_optlen == 0 &&
 #endif
 	    tp->t_inpcb->inp_options == NULL &&
-	    tp->t_inpcb->in6p_options == NULL)
-		tso = 1;
+	    tp->t_inpcb->in6p_options == NULL) {
+		tso_capable = true;
+	}
+
+	tso = !!(tso_capable && len > tp->t_maxseg);
 
 	if (sack_rxmit) {
 		if (p->rxmit + len < tp->snd_una + so->so_snd.sb_cc)
@@ -483,8 +556,16 @@ after_sack_rexmit:
 	 *	- we need to retransmit
 	 */
 	if (len) {
-		if (len >= tp->t_maxseg)
-			goto send;
+		if (len >= tp->t_maxseg) {
+			if (tso) {
+				if (tcp_tso_send_now(tp, len, sendwin)) {
+					goto send;
+				}
+			} else {
+				goto send;
+			}
+		}
+
 		/*
 		 * NOTE! on localhost connections an 'ack' from the remote
 		 * end may occur synchronously with the output and cause
@@ -1196,6 +1277,10 @@ timer:
 		 */
 		ip6->ip6_hlim = in6_selecthlim(tp->t_inpcb, NULL);
 
+		// We are about to send the frame - cancel the TSO_FLUSH timer
+		if (tp->t_flags & TF_TSO_PENDING)
+			tcp_cancel_tso_flush_timer(tp);
+
 		/* TODO: IPv6 IP6TOS_ECT bit on */
 		error = ip6_output(m, tp->t_inpcb->in6p_outputopts, &ro,
 		    ((so->so_options & SO_DONTROUTE) ?  IP_ROUTETOIF : 0),
@@ -1229,6 +1314,10 @@ timer:
 	 */
 	if (V_path_mtu_discovery && tp->t_maxopd > V_tcp_minmss)
 		ip->ip_off |= IP_DF;
+
+	// We are about to send the frame - cancel the TSO_FLUSH timer
+	if (tp->t_flags & TF_TSO_PENDING)
+		tcp_cancel_tso_flush_timer(tp);
 
 	error = ip_output(m, tp->t_inpcb->inp_options, &ro,
 	    ((so->so_options & SO_DONTROUTE) ? IP_ROUTETOIF : 0), 0,

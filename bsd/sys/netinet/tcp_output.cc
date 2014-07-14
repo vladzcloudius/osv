@@ -146,10 +146,8 @@ cc_after_idle(struct tcpcb *tp)
 
 static inline void cancel_tso_flush_timer(struct tcpcb *tp)
 {
-	if (tcp_timer_active(tp, TT_TSO_FLUSH)) {
-		trace_tso_flush_cancel();
-		tcp_timer_activate(tp, TT_TSO_FLUSH, 0);
-	}
+	tp->t_flags &= ~((u_int)TF_TSO_NOW);
+	tp->t_flags &= ~((u_int)TF_TSO_PENDING);
 }
 
 /*
@@ -531,13 +529,13 @@ after_sack_rexmit:
 		if (len >= send_thresh) {
 			goto send;
 		} else if (tp->t_flags & TF_TSO_NOW) {
-			tp->t_flags &= ~((u_int)TF_TSO_NOW);
 			trace_tso_flush_fire(len, off, sendwin,
 					     so->so_snd.sb_cc,
 					     tp->snd_nxt.raw() + len);
 			goto send;
-		} else if (!tcp_timer_active(tp, TT_TSO_FLUSH)) {
+		} else if (!(tp->t_flags & TF_TSO_PENDING)) {
 			trace_tso_flush_sched();
+			tp->t_flags |= TF_TSO_PENDING;
 			// Defer sending for no longer than 2 ticks
 			tcp_timer_activate(tp, TT_TSO_FLUSH, 2);
 		}

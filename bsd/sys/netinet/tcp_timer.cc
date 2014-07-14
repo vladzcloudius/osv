@@ -428,6 +428,10 @@ out:
 static void
 tcp_timer_tso_flush(serial_timer_task& timer, struct tcpcb *tp)
 {
+    if (!(tp->t_flags & TF_TSO_PENDING)) {
+        return;
+    }
+
 	trace_tcp_timer_tso_flush();
 
 	CURVNET_SET(tp->t_vnet);
@@ -437,10 +441,6 @@ tcp_timer_tso_flush(serial_timer_task& timer, struct tcpcb *tp)
 	KASSERT(inp != NULL, ("tcp_timer_tso_flush: inp == NULL"));
 	KASSERT(tp->t_flags & TF_TSO, "tcp_timer_tso_flush: TSO disabled");
 	INP_LOCK(inp);
-
-	if (timer.can_fire()) {
-		tcp_flush_net_channel(tp);
-	}
 
 	if (!timer.try_fire()) {
 		INP_UNLOCK(inp);

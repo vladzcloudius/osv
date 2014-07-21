@@ -405,7 +405,7 @@ private:
          *
          * @return TRUE if the vring has been actually indicated.
          */
-        bool kick_hw();
+        bool kick_hw(bool force = false);
 
         /**
          * Inform the Txq that there is a new pending work

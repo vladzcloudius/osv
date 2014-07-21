@@ -21,6 +21,9 @@
 #define virtio_w(...)   tprintf_w(virtio_tag, __VA_ARGS__)
 #define virtio_e(...)   tprintf_e(virtio_tag, __VA_ARGS__)
 
+TRACEPOINT(trace_vring_get_buf_finalize, "vring=%p: _used_ring_host_head %d", void*, int);
+TRACEPOINT(trace_vring_update_used_event, "vring=%p: _used_ring_host_head %d",void*, int);
+
 namespace virtio {
 
 class virtio_vring;
@@ -142,6 +145,8 @@ class virtio_driver;
         void get_buf_finalize(bool update_host = true) {
             _used_ring_host_head++;
 
+            trace_vring_get_buf_finalize(this, _used_ring_host_head);
+
             if (update_host) {
                 update_used_event();
             }
@@ -150,6 +155,7 @@ class virtio_driver;
         void update_used_event() {
             // only let the host know about our used idx in case irq are enabled
             if (_avail->interrupt_on()) {
+                trace_vring_update_used_event(this, _used_ring_host_head);
                 set_used_event(_used_ring_host_head, std::memory_order_release);
             }
         }
@@ -173,7 +179,7 @@ class virtio_driver;
         bool use_indirect(int desc_needed);
         void set_use_indirect(bool flag) { _use_indirect = flag;}
         bool get_use_indirect() { return _use_indirect;}
-        bool kick();
+        bool kick(bool force = false);
         // Total number of descriptors in ring
         int size() {return _num;}
 

@@ -46,6 +46,10 @@ TRACEPOINT(trace_virtio_net_fill_rx_ring_added, "if=%d, added=%d", int, int);
 TRACEPOINT(trace_virtio_net_tx_packet, "if=%d, len=%d", int, int);
 TRACEPOINT(trace_virtio_net_tx_failed_add_buf, "if=%d", int);
 TRACEPOINT(trace_virtio_net_tx_no_space_calling_gc, "if=%d", int);
+
+TRACEPOINT(trace_virtio_net_tx_packet_size, "vring %p vec_sz %d", void*, int);
+TRACEPOINT(trace_virtio_net_tx_xmit_one_failed_to_post, "vring %p vec_sz %d", void*, int);
+
 using namespace memory;
 
 // TODO list
@@ -137,7 +141,7 @@ inline int net::txq::xmit(mbuf* buff)
     return _xmitter.xmit(buff);
 }
 
-inline bool net::txq::kick_hw()
+inline bool net::txq::kick_hw(bool force)
 {
     bool kicked = vqueue->kick();
 #ifdef DEBUG_VIRTIO_TX
@@ -645,6 +649,8 @@ int net::txq::try_xmit_one_locked(net_req* req)
     req->tx_bytes = tx_bytes;
     vec_sz = vqueue->_sg_vec.size();
 
+    trace_virtio_net_tx_packet_size(vqueue, vec_sz);
+
     if (!vqueue->avail_ring_has_room(vec_sz)) {
         if (vqueue->used_ring_not_empty()) {
             trace_virtio_net_tx_no_space_calling_gc(_parent->_ifn->if_index);
@@ -682,9 +688,31 @@ void net::txq::xmit_one_locked(void* _req)
     net_req* req = static_cast<net_req*>(_req);
 
     if (try_xmit_one_locked(req)) {
+        trace_virtio_net_tx_xmit_one_failed_to_post(vqueue, vqueue->_sg_vec.size());
+
+        // We are going to poll - flush the pending packets
+        kick_pending();
+#if 0
+        auto delay = std::chrono::nanoseconds(1);
+        auto max_delay = std::chrono::microseconds(1);
+
+        //sched::thread::sleep(std::chrono::microseconds(usec));
+
         do {
-            // We are going to poll - flush the pending packets
-            kick_pending();
+            while (!vqueue->used_ring_not_empty()); {
+                kick_hw(true);
+                sched::thread::sleep(delay);
+
+                // Exponentially increase a delay
+                if (delay < max_delay) {
+                    delay += delay;
+                }
+            }
+
+            gc();
+        } while (!vqueue->add_buf(req));
+#endif
+        do {
             if (!vqueue->used_ring_not_empty()) {
                 do {
                     sched::thread::yield();

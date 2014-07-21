@@ -23,8 +23,12 @@ using sched::thread;
 
 TRACEPOINT(trace_virtio_enable_interrupts, "vring=%p", void*);
 TRACEPOINT(trace_virtio_disable_interrupts, "vring=%p", void*);
-TRACEPOINT(trace_virtio_kick, "queue=%d", u16);
-TRACEPOINT(trace_virtio_add_buf, "queue=%d, avail=%d", u16, u16);
+TRACEPOINT(trace_virtio_kick, "vring=%p kicking %d queue=%d _avail %d _avail_event %d added_since_kick %d", void*, bool, u16, u16, u16, u16);
+TRACEPOINT(trace_virtio_add_buf, "vring=%p queue=%d, avail=%d", void*, u16, u16);
+
+TRACEPOINT(trace_vring_get_buf_elem, "vring=%p _used_ring_host_head %d _used %d", void*, int, int);
+TRACEPOINT(trace_vring_get_buf_gc, "vring=%p _used_ring_guest_head %d _used_ring_host_head %d", void*, int, int);
+TRACEPOINT(trace_vring_get_buf_ret, "vring=%p _avail_count %d", void*, int);
 
 namespace virtio {
 
@@ -114,7 +118,7 @@ namespace virtio {
 
             get_buf_gc();
 
-            trace_virtio_add_buf(_q_index, _avail_count);
+            trace_virtio_add_buf(this, _q_index, _avail_count);
 
             int desc_needed = _sg_vec.size();
             bool indirect = false;
@@ -180,6 +184,8 @@ namespace virtio {
     {
             vring_used_elem elem;
 
+            trace_vring_get_buf_gc(this, _used_ring_guest_head, _used_ring_host_head);
+
             while (_used_ring_guest_head != _used_ring_host_head) {
 
                 int i = 1;
@@ -203,6 +209,8 @@ namespace virtio {
                 _desc[idx]._next = _avail_head; //instead, how about the end of the list?
                 _avail_head = elem._id;  // what's the relation to the add_buf? can I just postpone this?
             }
+
+            trace_vring_get_buf_ret(this, _avail_count);
     }
 
 
@@ -214,6 +222,9 @@ namespace virtio {
 
             // need to trim the free running counter w/ the array size
             int used_ptr = _used_ring_host_head & (_num - 1);
+
+            trace_vring_get_buf_elem(this, _used_ring_host_head,
+                                     _used->_idx.load(std::memory_order_acquire));
 
             if (_used_ring_host_head == _used->_idx.load(std::memory_order_acquire)) {
                 return nullptr;
@@ -264,13 +275,13 @@ namespace virtio {
     }
 
     bool
-    vring::kick() {
+    vring::kick(bool force) {
         bool kicked = true;
 
         if (_dev->get_event_idx_cap()) {
 
             std::atomic_thread_fence(std::memory_order_seq_cst);
-            kicked = ((u16)(_avail->_idx.load(std::memory_order_relaxed) - _avail_event->load(std::memory_order_relaxed) - 1) < _avail_added_since_kick);
+            kicked = force || ((u16)(_avail->_idx.load(std::memory_order_relaxed) - _avail_event->load(std::memory_order_relaxed) - 1) < _avail_added_since_kick);
 
         } else if (_used->notifications_disabled())
             return false;
@@ -285,8 +296,9 @@ namespace virtio {
         // the call to kick() itself is not issued for every separate buffer
         // and _avail_added_since_kick might wrap around due to this bulking.
         //
+        trace_virtio_kick(this, kicked, _q_index, _avail->_idx.load(std::memory_order_relaxed), _avail_event->load(std::memory_order_relaxed), _avail_added_since_kick);
+
         if (kicked || (_avail_added_since_kick >= (u16)(~0) / 2)) {
-            trace_virtio_kick(_q_index);
             _dev->kick(_q_index);
             _avail_added_since_kick = 0;
             return true;

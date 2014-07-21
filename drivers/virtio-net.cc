@@ -301,12 +301,14 @@ net::net(pci::device& dev)
     // TODO: What if_init() is for?
     tx_worker_task->start();
 
+    _txq.vqueue->disable_interrupts();
+
     ether_ifattach(_ifn, _config.mac);
 
     if (dev.is_msix()) {
         _msi.easy_register({
             { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
-            { 1, [&] { _txq.vqueue->disable_interrupts(); }, nullptr }
+            { 1, [&] { _txq.vqueue->disable_interrupts(); }, tx_worker_task }
         });
     } else {
         _gsi.set_ack_and_handler(dev.get_interrupt_line(),
@@ -712,12 +714,19 @@ void net::txq::xmit_one_locked(void* _req)
             gc();
         } while (!vqueue->add_buf(req));
 #endif
+#if 0
         do {
             if (!vqueue->used_ring_not_empty()) {
                 do {
                     sched::thread::yield();
                 } while (!vqueue->used_ring_not_empty());
             }
+            gc();
+        } while (!vqueue->add_buf(req));
+#endif
+        do {
+            _parent->virtio_driver::wait_for_queue(vqueue,
+                                                   &vring::used_ring_not_empty);
             gc();
         } while (!vqueue->add_buf(req));
     }

@@ -154,10 +154,10 @@ class virtio_driver;
 
         void update_used_event() {
             // only let the host know about our used idx in case irq are enabled
-            if (_avail->interrupt_on()) {
+            //if (_avail->interrupt_on()) {
                 trace_vring_update_used_event(this, _used_ring_host_head);
-                set_used_event(_used_ring_host_head, std::memory_order_release);
-            }
+                set_used_event(_used_ring_host_head, std::memory_order_seq_cst);
+            //}
         }
         // GC the used items that were already read to be emptied
         // within the ring. Should be called by add_buf

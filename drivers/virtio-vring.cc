@@ -278,13 +278,13 @@ namespace virtio {
     vring::kick(bool force) {
         bool kicked = true;
 
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+
         if (_dev->get_event_idx_cap()) {
-
-            std::atomic_thread_fence(std::memory_order_seq_cst);
             kicked = force || ((u16)(_avail->_idx.load(std::memory_order_relaxed) - _avail_event->load(std::memory_order_relaxed) - 1) < _avail_added_since_kick);
-
-        } else if (_used->notifications_disabled())
+        } else if (_used->notifications_disabled()) {
             return false;
+        }
 
         //
         // Kick when the avail_event has moved or at least every half u16 range

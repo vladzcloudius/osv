@@ -120,12 +120,11 @@ public:
 	struct tcp_timer *t_timers;	/* All the TCP timers in one struct */
 
 	struct	inpcb *t_inpcb;		/* back pointer to internet pcb */
+	struct	vnet *t_vnet;		/* back pointer to parent vnet */
 private:
 	int	t_state;		/* state of this connection */
 public:
-	u_int	t_flags;
-
-	struct	vnet *t_vnet;		/* back pointer to parent vnet */
+	u_int	t_flags CACHELINE_ALIGNED;
 
 	tcp_seq	snd_una;		/* send unacknowledged */
 	tcp_seq	snd_max;		/* highest sequence number sent;

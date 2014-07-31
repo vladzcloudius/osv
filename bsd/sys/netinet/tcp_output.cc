@@ -78,14 +78,14 @@
 TRACEPOINT(trace_tso_flush_sched, "");
 TRACEPOINT(trace_tso_flush_cancel, "");
 TRACEPOINT(trace_tso_flush_fire, "Going to send %d bytes", int);
-TRACEPOINT(trace_tcp_output, "Going to send %d bytes, off %d, sendwin %d sb_cc "
-							 "%d cur_seq %u", int, int, int, int, unsigned int);
+/*TRACEPOINT(trace_tcp_output, "Going to send %d bytes, off %d, sendwin %d sb_cc "
+							 "%d cur_seq %u", int, int, int, int, unsigned int); */
 TRACEPOINT(trace_tcp_output_error, "Transmission failed: %d", int);
 TRACEPOINT(trace_tcp_output_resched_start, "Rescheduling rexmit timer: start");
 TRACEPOINT(trace_tcp_output_resched_end, "Rescheduling rexmit timer: end");
 TRACEPOINT(trace_tcp_output_start, "%p: tcp_output(): START", void*);
 TRACEPOINT(trace_tcp_output_ret, "tcp_output() returning: %d", int);
-TRACEPOINT(trace_tcp_output_just_ret, "tcp_output() just returning: len %d off %d sendwin(snd_wnd: %d snd_cwnd %d) %d sb_cc %d", int, int, int, int, int, int);
+/*TRACEPOINT(trace_tcp_output_just_ret, "tcp_output() just returning: len %d off %d sendwin(snd_wnd: %d snd_cwnd %d) %d sb_cc %d", int, int, int, int, int, int); */
 
 TRACEPOINT(trace_tcp_output_cant_take_inp_lock, "Can't take inp lock");
 
@@ -765,7 +765,7 @@ dontupdate:
 	 * No reason to send a segment, just return.
 	 */
 
-	trace_tcp_output_just_ret(len, off, tp->snd_wnd, tp->snd_cwnd, sendwin, so->so_snd.sb_cc);
+	//trace_tcp_output_just_ret(len, off, tp->snd_wnd, tp->snd_cwnd, sendwin, so->so_snd.sb_cc);
 just_return:
 	return (0);
 
@@ -966,8 +966,8 @@ send:
 		 */
 		mb = sbsndptr(&so->so_snd, off, len, &moff);
 
-		trace_tcp_output(len, off, sendwin, so->so_snd.sb_cc,
-						 tp->snd_nxt.raw() + len);
+		/*trace_tcp_output(len, off, sendwin, so->so_snd.sb_cc,
+						 tp->snd_nxt.raw() + len);*/
 
 
 		if (len <= MHLEN - hdrlen - max_linkhdr) {

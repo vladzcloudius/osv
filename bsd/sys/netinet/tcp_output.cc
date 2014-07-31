@@ -78,16 +78,16 @@
 TRACEPOINT(trace_tso_flush_sched, "");
 TRACEPOINT(trace_tso_flush_cancel, "");
 TRACEPOINT(trace_tso_flush_fire, "Going to send %d bytes", int);
-/*TRACEPOINT(trace_tcp_output, "Going to send %d bytes, off %d, sendwin %d sb_cc "
-							 "%d cur_seq %u", int, int, int, int, unsigned int); */
+#if 0
+TRACEPOINT(trace_tcp_output, "Going to send %d bytes, off %d, sendwin %d sb_cc "
+							 "%d cur_seq %u", int, int, int, int, unsigned int);
 TRACEPOINT(trace_tcp_output_error, "Transmission failed: %d", int);
 TRACEPOINT(trace_tcp_output_resched_start, "Rescheduling rexmit timer: start");
 TRACEPOINT(trace_tcp_output_resched_end, "Rescheduling rexmit timer: end");
 TRACEPOINT(trace_tcp_output_start, "%p: tcp_output(): START", void*);
 TRACEPOINT(trace_tcp_output_ret, "tcp_output() returning: %d", int);
-/*TRACEPOINT(trace_tcp_output_just_ret, "tcp_output() just returning: len %d off %d sendwin(snd_wnd: %d snd_cwnd %d) %d sb_cc %d", int, int, int, int, int, int); */
-
-TRACEPOINT(trace_tcp_output_cant_take_inp_lock, "Can't take inp lock");
+TRACEPOINT(trace_tcp_output_just_ret, "tcp_output() just returning: len %d off %d sendwin(snd_wnd: %d snd_cwnd %d) %d sb_cc %d", int, int, int, int, int, int);
+#endif
 
 VNET_DEFINE(int, path_mtu_discovery) = 1;
 SYSCTL_VNET_INT(_net_inet_tcp, OID_AUTO, path_mtu_discovery, CTLFLAG_RW,
@@ -249,7 +249,7 @@ tcp_output(struct tcpcb *tp)
 	isipv6 = (tp->t_inpcb->inp_vflag & INP_IPV6) != 0;
 #endif
 
-	trace_tcp_output_start(tp);
+	//trace_tcp_output_start(tp);
 
 	INP_LOCK_ASSERT(tp->t_inpcb);
 
@@ -323,13 +323,13 @@ again:
 				p = NULL;
 				goto after_sack_rexmit;
 			} else {
-				trace_tcp_output_ret(13);
+				//trace_tcp_output_ret(13);
 				/* Can rexmit part of the current hole */
 				len = ((long)ulmin(cwin,
 						   tp->snd_recover - p->rxmit));
 			}
 		} else {
-			trace_tcp_output_ret(14);
+			//trace_tcp_output_ret(14);
 			len = ((long)ulmin(cwin, p->end - p->rxmit));
 		}
 		off = p->rxmit - tp->snd_una;
@@ -404,7 +404,7 @@ after_sack_rexmit:
 	 */
 	if (sack_rxmit == 0) {
 		if (sack_bytes_rxmt == 0) {
-			trace_tcp_output_ret(15);
+			//trace_tcp_output_ret(15);
 			len = ((long)ulmin(so->so_snd.sb_cc, sendwin) - off);
 		} else {
 			long cwin = 0;
@@ -414,7 +414,7 @@ after_sack_rexmit:
 			 * sending new data, having retransmitted all the
 			 * data possible in the scoreboard.
 			 */
-			trace_tcp_output_ret(16);
+			//trace_tcp_output_ret(16);
 			len = ((long)ulmin(so->so_snd.sb_cc, tp->snd_wnd) 
 			       - off);
 			/*
@@ -431,7 +431,7 @@ after_sack_rexmit:
 					sack_bytes_rxmt;
 				if (cwin < 0)
 					cwin = 0;
-				trace_tcp_output_ret(17);
+				//trace_tcp_output_ret(17);
 				len = lmin(len, cwin);
 			}
 		}
@@ -454,7 +454,7 @@ after_sack_rexmit:
 	 * with not fully conformant TCP implementations.
 	 */
 	if ((flags & TH_SYN) && (tp->t_flags & TF_NOOPT)) {
-		trace_tcp_output_ret(18);
+		//trace_tcp_output_ret(18);
 		len = 0;
 		flags &= ~TH_FIN;
 	}
@@ -470,7 +470,7 @@ after_sack_rexmit:
 		 * if it isn't already going.  If the window didn't
 		 * close completely, just wait for an ACK.
 		 */
-		trace_tcp_output_ret(19);
+		//trace_tcp_output_ret(19);
 		len = 0;
 		if (sendwin == 0) {
 			tcp_timer_activate(tp, TT_REXMT, 0);
@@ -588,18 +588,18 @@ after_sack_rexmit:
 		// When handling a SACK episode send data immediately.
 		//
 		if (sack_rxmit) {
-			trace_tcp_output_ret(2);
+			//trace_tcp_output_ret(2);
 			goto send;
 		}
 
 		if (len >= tp->t_maxseg) {
 			if (tso) {
 				if (tcp_tso_send_now(tp, len, sendwin)) {
-					trace_tcp_output_ret(20);
+					//trace_tcp_output_ret(20);
 					goto send;
 				}
 			} else {
-				trace_tcp_output_ret(21);
+				//trace_tcp_output_ret(21);
 				goto send;
 			}
 		}
@@ -618,15 +618,15 @@ after_sack_rexmit:
 			goto send;
 		}
 		if (tp->t_flags & TF_FORCEDATA) {	/* typ. timeout case */
-			trace_tcp_output_ret(6);
+			//trace_tcp_output_ret(6);
 			goto send;
 		}
 		if (len >= tp->max_sndwnd / 2 && tp->max_sndwnd > 0) {
-			trace_tcp_output_ret(7);
+			//trace_tcp_output_ret(7);
 			goto send;
 		}
 		if (tp->snd_nxt < tp->snd_max) {	/* retransmit case */
-			trace_tcp_output_ret(5);
+			//trace_tcp_output_ret(5);
 			goto send;
 		}
 	}
@@ -688,7 +688,7 @@ after_sack_rexmit:
 		    (adv >= (long)(so->so_rcv.sb_hiwat / 4) ||
 		     recwin <= (long)(so->so_rcv.sb_hiwat / 8) ||
 		     so->so_rcv.sb_hiwat <= 8 * tp->t_maxseg)) {
-			trace_tcp_output_ret(8);
+			//trace_tcp_output_ret(8);
 			goto send;
 		}
 	}
@@ -699,16 +699,16 @@ dontupdate:
 	 * is also a catch-all for the retransmit timer timeout case.
 	 */
 	if (tp->t_flags & TF_ACKNOW) {
-		trace_tcp_output_ret(9);
+		//trace_tcp_output_ret(9);
 		goto send;
 	}
 	if ((flags & TH_RST) ||
 	    ((flags & TH_SYN) && (tp->t_flags & TF_NEEDSYN) == 0)) {
-		trace_tcp_output_ret(10);
+		//trace_tcp_output_ret(10);
 		goto send;
 	}
 	if (tp->snd_up > tp->snd_una) {
-		trace_tcp_output_ret(11);
+		//trace_tcp_output_ret(11);
 		goto send;
 	}
 	/*
@@ -717,7 +717,7 @@ dontupdate:
 	 */
 	if (flags & TH_FIN &&
 	    ((tp->t_flags & TF_SENTFIN) == 0 || tp->snd_nxt == tp->snd_una)) {
-		trace_tcp_output_ret(12);
+		//trace_tcp_output_ret(12);
 		goto send;
 	}
 	/*
@@ -730,7 +730,7 @@ dontupdate:
 	    !tcp_timer_active(tp, TT_REXMT) &&
 	    !tcp_timer_active(tp, TT_PERSIST)) {
 		tcp_timer_activate(tp, TT_REXMT, tp->t_rxtcur);
-		trace_tcp_output_ret(1);
+		//trace_tcp_output_ret(1);
 		goto just_return;
 	} 
 	/*
@@ -943,7 +943,7 @@ send:
 		MGETHDR(m, M_DONTWAIT, MT_DATA);
 		if (m == NULL) {
 			error = ENOBUFS;
-			trace_tcp_output_ret(3);
+			//trace_tcp_output_ret(3);
 			goto out;
 		}
 #ifdef INET6
@@ -952,7 +952,7 @@ send:
 			if ((m->m_hdr.mh_flags & M_EXT) == 0) {
 				m_freem(m);
 				error = ENOBUFS;
-				trace_tcp_output_ret(4);
+				//trace_tcp_output_ret(4);
 				goto out;
 			}
 		}
@@ -1393,7 +1393,7 @@ timer:
 #endif /* INET */
 	if (error) {
 
-		trace_tcp_output_error(error);
+		//trace_tcp_output_error(error);
 
 		/*
 		 * We know that the packet was lost, so back out the
@@ -1428,9 +1428,9 @@ out:
 		case ENOBUFS:
 	                if (!tcp_timer_active(tp, TT_REXMT) &&
 			    !tcp_timer_active(tp, TT_PERSIST)) {
-				trace_tcp_output_resched_start();
+				//trace_tcp_output_resched_start();
 	                        tcp_timer_activate(tp, TT_REXMT, tp->t_rxtcur);
-				trace_tcp_output_resched_end();
+				//trace_tcp_output_resched_end();
 			}
 
 			tp->snd_cwnd = tp->t_maxseg;

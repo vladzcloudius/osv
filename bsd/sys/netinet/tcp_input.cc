@@ -101,8 +101,9 @@ TRACEPOINT(trace_tcp_sock_buf, "sbspace(so_rcv) %d", int);
 TRACEPOINT(trace_tcp_sock_buf_scale, "tlen %d", int);
 TRACEPOINT(trace_tcp_autorcvbuf, "%d", int);
 
-TRACEPOINT(trace_tcp_autorcvbuf_info, "V_tcp_do_autorcvbuf %d to.to_tsecr %d "
-				      "so->so_rcv.sb_flags %d", int, int, int);
+TRACEPOINT(trace_tcp_autorcvbuf_info, "V_tcp_do_autorcvbuf %d to.to_tsecr %u rfbuf_ts %u"
+				      "so->so_rcv.sb_flags 0x%x",
+				      int, unsigned int, unsigned int, int);
 TRACEPOINT(trace_tcp_rcvbuf_resize, "newsize %d", int);
 
 const int tcprexmtthresh = 3;
@@ -1394,7 +1395,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		 * the buffer to better manage the socket buffer resources.
 		 */
 			trace_tcp_autorcvbuf_info(V_tcp_do_autorcvbuf,
-						  to.to_tsecr,
+						  to.to_tsecr, tp->rfbuf_ts,
 						  so->so_rcv.sb_flags);
 
 			if (V_tcp_do_autorcvbuf &&

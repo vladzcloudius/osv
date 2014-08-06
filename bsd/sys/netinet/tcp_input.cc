@@ -93,6 +93,18 @@
 
 TRACEPOINT(trace_tcp_input_ack, "%p: We've got ACK: %u", void*, unsigned int);
 
+TRACEPOINT(trace_tcp_rcv_win, "win %d rcv_adv %u rcv_nxt %u (rcv_adv-rcv_nxt) %d rcv_wnd %u",
+	   int, unsigned int, unsigned int, int, unsigned int);
+
+TRACEPOINT(trace_tcp_rcv_adv, "rcv_wnd %d rcv_scale %d rcv_adv %d", int, int, int);
+TRACEPOINT(trace_tcp_sock_buf, "sbspace(so_rcv) %d", int);
+TRACEPOINT(trace_tcp_sock_buf_scale, "tlen %d", int);
+TRACEPOINT(trace_tcp_autorcvbuf, "%d", int);
+
+TRACEPOINT(trace_tcp_autorcvbuf_info, "V_tcp_do_autorcvbuf %d to.to_tsecr %d "
+				      "so->so_rcv.sb_flags %d", int, int, int);
+TRACEPOINT(trace_tcp_rcvbuf_resize, "newsize %d", int);
+
 const int tcprexmtthresh = 3;
 
 VNET_DEFINE(struct tcpstat, tcpstat);
@@ -1031,6 +1043,8 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	thflags = th->th_flags;
 	tp->sackhint.last_sack_ack = tcp_seq(0);
 
+	trace_tcp_sock_buf(sbspace(&so->so_rcv));
+
 	/*
 	 * If this is either a state-changing packet or current state isn't
 	 * established, we require a write lock on tcbinfo.  Otherwise, we
@@ -1052,6 +1066,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		if (INP_INFO_TRY_WLOCK(&V_tcbinfo)) {
 			ti_locked = TI_WLOCKED;
 		} else {
+			//trace_tcp_do_segment_ret(1);
 			goto drop;
 		}
 	}
@@ -1308,6 +1323,9 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			}
 		} else if (th->th_ack == tp->snd_una &&
 		    tlen <= sbspace(&so->so_rcv)) {
+
+			trace_tcp_sock_buf_scale(tlen);
+
 			int newsize = 0;	/* automatic sockbuf scaling */
 
 			/*
@@ -1375,11 +1393,17 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		 * TODO: Only step up if the application is actually serving
 		 * the buffer to better manage the socket buffer resources.
 		 */
+			trace_tcp_autorcvbuf_info(V_tcp_do_autorcvbuf,
+						  to.to_tsecr,
+						  so->so_rcv.sb_flags);
+
 			if (V_tcp_do_autorcvbuf &&
 			    to.to_tsecr &&
 			    (so->so_rcv.sb_flags & SB_AUTOSIZE)) {
 				if (TSTMP_GT(to.to_tsecr, tp->rfbuf_ts) &&
 				    to.to_tsecr - tp->rfbuf_ts < hz) {
+					trace_tcp_autorcvbuf(1);
+
 					if (tp->rfbuf_cnt >
 					    (so->so_rcv.sb_hiwat / 8 * 7) &&
 					    so->so_rcv.sb_hiwat <
@@ -1388,12 +1412,15 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 						    bsd_min(so->so_rcv.sb_hiwat +
 						    V_tcp_autorcvbuf_inc,
 						    V_tcp_autorcvbuf_max);
+						trace_tcp_autorcvbuf(newsize);
 					}
 					/* Start over with next RTT. */
 					tp->rfbuf_ts = 0;
 					tp->rfbuf_cnt = 0;
-				} else
+				} else {
+					trace_tcp_autorcvbuf(2);
 					tp->rfbuf_cnt += tlen;	/* add up */
+				}
 			}
 
 			/* Add data to socket buffer. */
@@ -1407,8 +1434,10 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				 */
 				if (newsize)
 					if (!sbreserve_locked(&so->so_rcv,
-					    newsize, so, NULL))
+					    newsize, so, NULL)) {
+						trace_tcp_rcvbuf_resize(newsize);
 						so->so_rcv.sb_flags &= ~SB_AUTOSIZE;
+					}
 				m_adj(m, drop_hdrlen);	/* delayed header drop */
 				sbappendstream_locked(so, &so->so_rcv, m);
 			}
@@ -1433,6 +1462,9 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	if (win < 0)
 		win = 0;
 	tp->rcv_wnd = imax(win, (int)(tp->rcv_adv - tp->rcv_nxt));
+
+	trace_tcp_rcv_win(win, tp->rcv_adv.raw() , tp->rcv_nxt.raw(),
+			  (int)(tp->rcv_adv - tp->rcv_nxt), tp->rcv_wnd);
 
 	/* Reset receive buffer auto scaling when not in bulk receive mode. */
 	tp->rfbuf_ts = 0;
@@ -1495,6 +1527,9 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			}
 			tp->rcv_adv += imin(tp->rcv_wnd,
 			    TCP_MAXWIN << tp->rcv_scale);
+
+			trace_tcp_rcv_adv(tp->rcv_wnd, tp->rcv_scale, tp->rcv_adv.raw());
+
 			tp->snd_una++;		/* SYN is acked */
 			/*
 			 * If there's data, delay ACK; if there's also a FIN

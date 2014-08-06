@@ -89,6 +89,8 @@ TRACEPOINT(trace_tcp_output_just_ret, "tcp_output() just returning: len %d off %
 
 TRACEPOINT(trace_tcp_output_cant_take_inp_lock, "Can't take inp lock");
 
+TRACEPOINT(trace_tcp_recwin, "recwin %u rcv_scale %d", unsigned int, int);
+
 VNET_DEFINE(int, path_mtu_discovery) = 1;
 SYSCTL_VNET_INT(_net_inet_tcp, OID_AUTO, path_mtu_discovery, CTLFLAG_RW,
 	&VNET_NAME(path_mtu_discovery), 1,
@@ -1126,6 +1128,8 @@ send:
 		recwin = (long)(tp->rcv_adv - tp->rcv_nxt);
 	if (recwin > (long)TCP_MAXWIN << tp->rcv_scale)
 		recwin = (long)TCP_MAXWIN << tp->rcv_scale;
+
+	trace_tcp_recwin(recwin, tp->rcv_scale);
 
 	/*
 	 * According to RFC1323 the window field in a SYN (i.e., a <SYN>

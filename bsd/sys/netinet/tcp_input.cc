@@ -101,9 +101,10 @@ TRACEPOINT(trace_tcp_sock_buf, "sbspace(so_rcv) %d", int);
 TRACEPOINT(trace_tcp_sock_buf_scale, "tlen %d", int);
 TRACEPOINT(trace_tcp_autorcvbuf, "%d", int);
 
-TRACEPOINT(trace_tcp_autorcvbuf_info, "V_tcp_do_autorcvbuf %d to.to_tsecr %u rfbuf_ts %u"
-				      "so->so_rcv.sb_flags 0x%x",
-				      int, unsigned int, unsigned int, int);
+TRACEPOINT(trace_tcp_autorcvbuf_info, "V_tcp_do_autorcvbuf %d tp->rfbuf_cnt %u "
+				      "rfbuf_ts %u s_rtt %d so->so_rcv.sb_flags 0x%x",
+				      int, unsigned int, unsigned int,
+				      unsigned int, int);
 TRACEPOINT(trace_tcp_rcvbuf_resize, "newsize %d", int);
 
 const int tcprexmtthresh = 3;
@@ -1395,32 +1396,31 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		 * the buffer to better manage the socket buffer resources.
 		 */
 			trace_tcp_autorcvbuf_info(V_tcp_do_autorcvbuf,
-						  to.to_tsecr, tp->rfbuf_ts,
+						  tp->rfbuf_cnt, tp->rfbuf_ts,
+						  tp->t_srtt,
 						  so->so_rcv.sb_flags);
 
+			//If autosizing is enabled
 			if (V_tcp_do_autorcvbuf &&
-			    to.to_tsecr &&
 			    (so->so_rcv.sb_flags & SB_AUTOSIZE)) {
-				if (TSTMP_GT(to.to_tsecr, tp->rfbuf_ts) &&
-				    to.to_tsecr - tp->rfbuf_ts < hz) {
-					trace_tcp_autorcvbuf(1);
-
+				if (tp->rfbuf_ts &&
+				    (bsd_ticks - tp->rfbuf_ts <
+					       (tp->t_srtt >> TCP_RTT_SHIFT))) {
+					tp->rfbuf_cnt += tlen;	/* add up */
+				} else {
 					if (tp->rfbuf_cnt >
-					    (so->so_rcv.sb_hiwat / 8 * 7) &&
+						(so->so_rcv.sb_hiwat / 8 * 7) &&
 					    so->so_rcv.sb_hiwat <
-					    V_tcp_autorcvbuf_max) {
+						V_tcp_autorcvbuf_max) {
 						newsize =
-						    bsd_min(so->so_rcv.sb_hiwat +
-						    V_tcp_autorcvbuf_inc,
-						    V_tcp_autorcvbuf_max);
-						trace_tcp_autorcvbuf(newsize);
+							bsd_min(so->so_rcv.sb_hiwat +
+							    V_tcp_autorcvbuf_inc,
+							    V_tcp_autorcvbuf_max);
+							trace_tcp_autorcvbuf(newsize);
 					}
 					/* Start over with next RTT. */
-					tp->rfbuf_ts = 0;
+					tp->rfbuf_ts = bsd_ticks;
 					tp->rfbuf_cnt = 0;
-				} else {
-					trace_tcp_autorcvbuf(2);
-					tp->rfbuf_cnt += tlen;	/* add up */
 				}
 			}
 
@@ -1467,9 +1467,11 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	trace_tcp_rcv_win(win, tp->rcv_adv.raw() , tp->rcv_nxt.raw(),
 			  (int)(tp->rcv_adv - tp->rcv_nxt), tp->rcv_wnd);
 
+	#if 0
 	/* Reset receive buffer auto scaling when not in bulk receive mode. */
 	tp->rfbuf_ts = 0;
 	tp->rfbuf_cnt = 0;
+	#endif
 
 	switch (tp->get_state()) {
 

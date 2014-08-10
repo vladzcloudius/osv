@@ -206,7 +206,7 @@ public:
 					   episode starts at this seq number */
 	struct sackhint	sackhint;	/* SACK scoreboard hint */
 	int	t_rttlow;		/* smallest observerved RTT */
-	u_int32_t	rfbuf_ts;	/* recv buffer autoscaling timestamp */
+	int	rfbuf_ts;		/* recv buffer autoscaling timestamp */
 	int	rfbuf_cnt;		/* recv buffer autoscaling byte count */
 	int	t_sndrexmitpack;	/* retransmit packets sent */
 	int	t_rcvoopack;		/* out-of-order packets received */

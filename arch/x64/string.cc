@@ -14,6 +14,9 @@
 #include "memcpy_decode.hh"
 #include <assert.h>
 #include <x86intrin.h>
+#include <osv/trace.hh>
+
+TRACEPOINT(trace_memcpy_bad_pointers, "src %p, dest %p n %d", const void*, void*, size_t);
 
 extern "C"
 void *memcpy_base(void *__restrict dest, const void *__restrict src, size_t n);
@@ -194,6 +197,36 @@ static inline void* sse_memcpy(void* dest, const void* src, size_t n)
     return dest;
 }
 
+static inline void *memcpy_vlad(void *__restrict dest,
+				const void *__restrict src, size_t n)
+{
+	size_t i, nw = n / 8;
+        size_t nb = n & 7;
+	u64 *dest64 = (u64*)dest;
+	u64 *src64 = (u64*)src;
+
+	if (((u64)src & 7) || ((u64)dest & 7)) {
+		nw = 0;
+		nb = n;
+		trace_memcpy_bad_pointers(src, dest, n);
+	}
+
+	for (i = 0; i < nw; i++) {
+		register u64 val = *src64++;
+		*dest64++ = val;
+	}
+
+	u8 *dest8 = (u8*)(dest + 8 * nw);
+	u8 *src8 = (u8*)(src + 8 * nw);
+
+	for (i = 0; i < nb; i++) {
+		register u8 val = *src8++;
+		*dest8++ = val;
+	}
+
+	return dest;
+}
+
 extern "C"
 void *memcpy_repmov_old(void *__restrict dest, const void *__restrict src, size_t n)
 {
@@ -202,6 +235,7 @@ void *memcpy_repmov_old(void *__restrict dest, const void *__restrict src, size_
     } else if (n < 256) {
         return sse_memcpy(dest, src, n);
     } else {
+#if 0
         auto ret = dest;
         auto nw = n / 8;
         auto nb = n & 7;
@@ -209,7 +243,10 @@ void *memcpy_repmov_old(void *__restrict dest, const void *__restrict src, size_
         repmovsq(dest, src, nw);
         repmovsb(dest, src, nb);
 
-        return ret;
+	return ret;
+#else
+	return memcpy_vlad(dest, src, n);
+#endif
     }
 }
 

@@ -267,7 +267,7 @@ void *memcpy_repmov(void *__restrict dest, const void *__restrict src, size_t n)
 extern "C"
 void *(*resolve_memcpy())(void *__restrict dest, const void *__restrict src, size_t n)
 {
-    if (processor::features().repmovsb) {
+    if (false && processor::features().repmovsb) {
         return memcpy_repmov;
     }
     return memcpy_repmov_old;

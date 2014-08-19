@@ -217,8 +217,11 @@ void mutex::unlock()
     // We assume unlock() is only ever called when this thread is holding
     // the lock. The following assertions don't seem to add any measurable
     // performance penalty, so we leave them in.
-    assert(owner.load(std::memory_order_relaxed) == sched::thread::current());
-    assert(depth!=0);
+    //assert(owner.load(std::memory_order_relaxed) == sched::thread::current());
+    //assert(depth!=0);
+    if (!depth) {
+	    return;
+    }
     if (--depth)
         return; // recursive mutex still locked.
 

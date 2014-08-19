@@ -7,3 +7,4 @@
 /dev: ../../static
 /proc: ../../static
 /tmp: ../../static
+/uperf.so: /home/vladz/Downloads/uperf-1.0.4/src/uperf

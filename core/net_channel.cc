@@ -174,6 +174,9 @@ net_channel* classifier::classify_ipv4_tcp(mbuf* m)
     }
     auto src_port = ntohs(tcp_hdr->th_sport);
     auto dst_port = ntohs(tcp_hdr->th_dport);
+
+    printf("classify_ipv4_tcp: [src(%d):dst(%d)]\n", src_port, dst_port);
+
     auto id = ipv4_tcp_conn_id{src_addr, dst_addr, src_port, dst_port};
     auto i = _ipv4_tcp_channels.reader_find(id,
             std::hash<ipv4_tcp_conn_id>(), key_item_compare());

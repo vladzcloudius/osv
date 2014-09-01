@@ -8,6 +8,7 @@
 #include <osv/percpu.hh>
 #include <osv/wait_record.hh>
 #include <osv/percpu_xmit.hh>
+#include <osv/preempt-lock.hh>
 
 #include <lockfree/ring.hh>
 #include <lockfree/queue-mpsc.hh>
@@ -283,53 +284,58 @@ public:
 
         _txq->stats.tx_worker_wakeups++;
 
-        // Start taking packets one-by-one and send them out
-        while (!stop_pred()) {
-            //
-            // Reset the PENDING state.
-            //
-            // The producer thread will first add a new element to the heap and
-            // only then set the PENDING state.
-            //
-            // We need to ensure that PENDING is cleared before _mg.pop() is
-            // performed (and possibly returns false - the heap is empty)
-            // because otherwise the producer may see the "old" value of the
-            // PENDING state and won't wake us up.
-            //
-            // However since the StoreLoad memory barrier is expensive we'll
-            // first perform a "weak" (not ordered) clearing and only if
-            // _mg.pop() returns false we'll put an appropriate memory barrier
-            // and check the _mg.pop() again.
-            //
-            clear_pending_weak();
+        WITH_LOCK(preempt_lock) {
 
-            // Check if there are elements in the heap
-            if (!_mg.pop(xmit_it)) {
+            // Start taking packets one-by-one and send them out
+            while (!stop_pred()) {
+                //
+                // Reset the PENDING state.
+                //
+                // The producer thread will first add a new element to the heap and
+                // only then set the PENDING state.
+                //
+                // We need to ensure that PENDING is cleared before _mg.pop() is
+                // performed (and possibly returns false - the heap is empty)
+                // because otherwise the producer may see the "old" value of the
+                // PENDING state and won't wake us up.
+                //
+                // However since the StoreLoad memory barrier is expensive we'll
+                // first perform a "weak" (not ordered) clearing and only if
+                // _mg.pop() returns false we'll put an appropriate memory barrier
+                // and check the _mg.pop() again.
+                //
+                clear_pending_weak();
 
-                std::atomic_thread_fence(std::memory_order_seq_cst);
-
+                // Check if there are elements in the heap
                 if (!_mg.pop(xmit_it)) {
 
-                    // Wake all unwoken waiters before going to sleep
-                    wake_waiters_all();
+                    std::atomic_thread_fence(std::memory_order_seq_cst);
 
-                    // We are going to sleep - release the HW channel
-                    unlock_running();
+                    if (!_mg.pop(xmit_it)) {
 
-                    sched::thread::wait_until([this] { return has_pending(); });
+                        // Wake all unwoken waiters before going to sleep
+                        wake_waiters_all();
 
-                    lock_running();
+                        // We are going to sleep - release the HW channel
+                        unlock_running();
 
-                    _txq->stats.tx_worker_wakeups++;
+                        DROP_LOCK(preempt_lock) {
+                            sched::thread::wait_until([this] { return has_pending(); });
+
+                            lock_running();
+                        }
+
+                        _txq->stats.tx_worker_wakeups++;
+                    }
                 }
-            }
 
-            while (_mg.pop(xmit_it)) {
-                _txq->kick_pending_with_thresh();
-            }
+                while (_mg.pop(xmit_it)) {
+                    _txq->kick_pending_with_thresh();
+                }
 
-            // Kick any pending work
-            _txq->kick_pending();
+                // Kick any pending work
+                _txq->kick_pending();
+            }
         }
 
         // TODO: Add some handshake like a bool variable here

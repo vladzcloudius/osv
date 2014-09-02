@@ -8,7 +8,6 @@
 #include <osv/percpu.hh>
 #include <osv/wait_record.hh>
 #include <osv/percpu_xmit.hh>
-#include <osv/preempt-lock.hh>
 
 #include <lockfree/ring.hh>
 #include <lockfree/queue-mpsc.hh>
@@ -284,58 +283,53 @@ public:
 
         _txq->stats.tx_worker_wakeups++;
 
-        WITH_LOCK(preempt_lock) {
+        // Start taking packets one-by-one and send them out
+        while (!stop_pred()) {
+            //
+            // Reset the PENDING state.
+            //
+            // The producer thread will first add a new element to the heap and
+            // only then set the PENDING state.
+            //
+            // We need to ensure that PENDING is cleared before _mg.pop() is
+            // performed (and possibly returns false - the heap is empty)
+            // because otherwise the producer may see the "old" value of the
+            // PENDING state and won't wake us up.
+            //
+            // However since the StoreLoad memory barrier is expensive we'll
+            // first perform a "weak" (not ordered) clearing and only if
+            // _mg.pop() returns false we'll put an appropriate memory barrier
+            // and check the _mg.pop() again.
+            //
+            clear_pending_weak();
 
-            // Start taking packets one-by-one and send them out
-            while (!stop_pred()) {
-                //
-                // Reset the PENDING state.
-                //
-                // The producer thread will first add a new element to the heap and
-                // only then set the PENDING state.
-                //
-                // We need to ensure that PENDING is cleared before _mg.pop() is
-                // performed (and possibly returns false - the heap is empty)
-                // because otherwise the producer may see the "old" value of the
-                // PENDING state and won't wake us up.
-                //
-                // However since the StoreLoad memory barrier is expensive we'll
-                // first perform a "weak" (not ordered) clearing and only if
-                // _mg.pop() returns false we'll put an appropriate memory barrier
-                // and check the _mg.pop() again.
-                //
-                clear_pending_weak();
+            // Check if there are elements in the heap
+            if (!_mg.pop(xmit_it)) {
 
-                // Check if there are elements in the heap
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+
                 if (!_mg.pop(xmit_it)) {
 
-                    std::atomic_thread_fence(std::memory_order_seq_cst);
+                    // Wake all unwoken waiters before going to sleep
+                    wake_waiters_all();
 
-                    if (!_mg.pop(xmit_it)) {
+                    // We are going to sleep - release the HW channel
+                    unlock_running();
 
-                        // Wake all unwoken waiters before going to sleep
-                        wake_waiters_all();
+                    sched::thread::wait_until([this] { return has_pending(); });
 
-                        // We are going to sleep - release the HW channel
-                        unlock_running();
+                    lock_running();
 
-                        DROP_LOCK(preempt_lock) {
-                            sched::thread::wait_until([this] { return has_pending(); });
-
-                            lock_running();
-                        }
-
-                        _txq->stats.tx_worker_wakeups++;
-                    }
+                    _txq->stats.tx_worker_wakeups++;
                 }
-
-                while (_mg.pop(xmit_it)) {
-                    _txq->kick_pending_with_thresh();
-                }
-
-                // Kick any pending work
-                _txq->kick_pending();
             }
+
+            while (_mg.pop(xmit_it)) {
+                _txq->kick_pending_with_thresh();
+            }
+
+            // Kick any pending work
+            _txq->kick_pending();
         }
 
         // TODO: Add some handshake like a bool variable here

@@ -271,6 +271,17 @@ private:
 
     gsi_level_interrupt _gsi;
 
+    /* Wakeup efficiency statistics */
+    struct wakeup_stats {
+        /* Count the number of wakeups when more than X packets were handled */
+        u64 packets_8;
+        u64 packets_16;
+        u64 packets_32;
+        u64 packets_64;
+        u64 packets_128;
+        u64 packets_256;
+    };
+
     struct rxq_stats {
         u64 rx_packets; /* if_ipackets */
         u64 rx_bytes;   /* if_ibytes */
@@ -278,6 +289,8 @@ private:
         u64 rx_csum;    /* number of packets with correct csum */
         u64 rx_csum_err;/* number of packets with a bad checksum */
         u64 rx_bh_wakeups;
+
+        wakeup_stats rx_wakeup_stats;
     };
 
     struct txq_stats {
@@ -293,7 +306,20 @@ private:
         u64 tx_worker_wakeups;
         u64 tx_worker_packets;
         u64 tx_hw_queue_is_full;
+
+        wakeup_stats tx_wakeup_stats;
     };
+
+    static void update_wakeup_stats(wakeup_stats& stats,
+                                    const u64 wakeup_packets)
+    {
+        stats.packets_8   += !!(wakeup_packets & ~7UL);
+        stats.packets_16  += !!(wakeup_packets & ~15UL);
+        stats.packets_32  += !!(wakeup_packets & ~31UL);
+        stats.packets_64  += !!(wakeup_packets & ~63UL);
+        stats.packets_128 += !!(wakeup_packets & ~127UL);
+        stats.packets_256 += !!(wakeup_packets & ~255UL);
+    }
 
      /* Single Rx queue object */
     struct rxq {
@@ -303,6 +329,10 @@ private:
         vring* vqueue;
         sched::thread  poll_task;
         struct rxq_stats stats = { 0 };
+
+        void update_wakeup_stats(const u64 wakeup_packets) {
+            net::update_wakeup_stats(stats.rx_wakeup_stats, wakeup_packets);
+        }
     };
 
     /**
@@ -381,6 +411,10 @@ private:
         void wake_worker();
 
         int xmit(mbuf* m_head);
+
+        void update_wakeup_stats(const u64 wakeup_packets) {
+            net::update_wakeup_stats(stats.tx_wakeup_stats, wakeup_packets);
+        }
 
         /* TODO: drain the per-cpu rings in ~txq() and in if_qflush() */
 

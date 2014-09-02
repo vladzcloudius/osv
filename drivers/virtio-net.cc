@@ -192,18 +192,25 @@ void net::fill_stats(struct if_data* out_data) const
     fill_qstats(_txq, out_data);
 }
 
-void net::fill_qstats(const struct rxq& rxq,
-                             struct if_data* out_data) const
+void net::fill_qstats(const struct rxq& rxq, struct if_data* out_data) const
 {
     out_data->ifi_ipackets   += rxq.stats.rx_packets;
     out_data->ifi_ibytes     += rxq.stats.rx_bytes;
     out_data->ifi_iqdrops    += rxq.stats.rx_drops;
     out_data->ifi_ierrors    += rxq.stats.rx_csum_err;
     out_data->ifi_ibh_wakeups = rxq.stats.rx_bh_wakeups;
+
+    const wakeup_stats *wakeup_stats = &rxq.stats.rx_wakeup_stats;
+
+    printf("rx_bh_packets_8 %ld\n", wakeup_stats->packets_8);
+    printf("rx_bh_packets_16 %ld\n", wakeup_stats->packets_16);
+    printf("rx_bh_packets_32 %ld\n", wakeup_stats->packets_32);
+    printf("rx_bh_packets_64 %ld\n", wakeup_stats->packets_64);
+    printf("rx_bh_packets_128 %ld\n", wakeup_stats->packets_128);
+    printf("rx_bh_packets_256 %ld\n", wakeup_stats->packets_256);
 }
 
-void net::fill_qstats(const struct txq& txq,
-                      struct if_data* out_data) const
+void net::fill_qstats(const struct txq& txq, struct if_data* out_data) const
 {
     assert(!out_data->ifi_oerrors && !out_data->ifi_obytes && !out_data->ifi_opackets);
     out_data->ifi_opackets       += txq.stats.tx_packets;
@@ -214,6 +221,15 @@ void net::fill_qstats(const struct txq& txq,
     out_data->ifi_oworker_packets = txq.stats.tx_worker_packets;
     out_data->ifi_okicks          = txq.stats.tx_kicks;
     out_data->ifi_oqueue_is_full  = txq.stats.tx_hw_queue_is_full;
+
+    const wakeup_stats *wakeup_stats = &txq.stats.tx_wakeup_stats;
+
+    printf("tx_worker_packets_8 %ld\n", wakeup_stats->packets_8);
+    printf("tx_worker_packets_16 %ld\n", wakeup_stats->packets_16);
+    printf("tx_worker_packets_32 %ld\n", wakeup_stats->packets_32);
+    printf("tx_worker_packets_64 %ld\n", wakeup_stats->packets_64);
+    printf("tx_worker_packets_128 %ld\n", wakeup_stats->packets_128);
+    printf("tx_worker_packets_256 %ld\n", wakeup_stats->packets_256);
 }
 
 bool net::ack_irq()
@@ -416,6 +432,8 @@ void net::receiver()
 {
     vring* vq = _rxq.vqueue;
     std::vector<iovec> packet;
+    u64 rx_drops = 0, rx_packets = 0, csum_ok = 0;
+    u64 csum_err = 0, rx_bytes = 0;
 
     while (1) {
 
@@ -424,11 +442,12 @@ void net::receiver()
         trace_virtio_net_rx_wake();
 
         _rxq.stats.rx_bh_wakeups++;
+        _rxq.update_wakeup_stats(rx_packets);
 
         u32 len;
         int nbufs;
-        u64 rx_drops = 0, rx_packets = 0, csum_ok = 0;
-        u64 csum_err = 0, rx_bytes = 0;
+        rx_drops = rx_packets = csum_ok = 0;
+        csum_err = rx_bytes = 0;
 
         // use local header that we copy out of the mbuf since we're
         // truncating it.

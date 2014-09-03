@@ -173,6 +173,8 @@ public:
     void xmit_one_locked(void *req);
     void wake_worker();
     void update_wakeup_stats(const u64 wakeup_packets) {/*TODO*/}
+    void set_worker_priority(float prio) { task.set_priority(prio); }
+    float prio;
 
     struct {
         u64 tx_packets; /* if_opackets */

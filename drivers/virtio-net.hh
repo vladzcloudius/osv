@@ -321,11 +321,6 @@ private:
         stats.packets_256 += !!(wakeup_packets & ~255UL);
     }
 
-#define PRIO_STEP_DOWN  0.000001
-#define PRIO_STEP_UP    0.01
-#define MAX_PRIO        1.0 // Maybe not?
-#define MIN_PRIO        0.000000001
-
     // TODO: Maybe rename the threads fields? This will save the thr parameter
     template<class Q>
     static void update_thread_prio(Q& q, sched::thread &thr,
@@ -458,6 +453,8 @@ private:
             net::update_wakeup_stats(stats.tx_wakeup_stats, wakeup_packets);
             net::update_thread_prio(*this, worker, stats.tx_wakeup_stats);
         }
+
+        void set_worker_priority(float prio) { worker.set_priority(prio); }
 
         /* TODO: drain the per-cpu rings in ~txq() and in if_qflush() */
 

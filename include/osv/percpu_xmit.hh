@@ -18,6 +18,11 @@
 
 #include <boost/function_output_iterator.hpp>
 
+#define PRIO_STEP_DOWN      0.000001
+#define PRIO_STEP_UP        0.01
+#define MAX_PRIO            1.0 // Maybe not?
+#define MIN_PRIO            0.000000001
+
 namespace osv {
 
 /**
@@ -268,6 +273,7 @@ public:
         // Create a collection of a per-CPU queues
         std::list<cpu_queue_type*> all_cpuqs;
         u64 cur_worker_packets = 0;
+        int pkt_cnt = 0;
 
         for (auto c : sched::cpus) {
             all_cpuqs.push_back(_cpuq.for_cpu(c)->get());
@@ -317,6 +323,8 @@ public:
                     // We are going to sleep - release the HW channel
                     unlock_running();
 
+                    pkt_cnt = 0;
+
                     sched::thread::wait_until([this] { return has_pending(); });
 
                     lock_running();
@@ -329,8 +337,17 @@ public:
                 }
             }
 
+            pkt_cnt++;
+
             while (_mg.pop(xmit_it)) {
                 _txq->kick_pending_with_thresh();
+                if (++pkt_cnt >= 64) {
+                    pkt_cnt = 0;
+                    if (_txq->prio > MIN_PRIO + PRIO_STEP_UP) {
+                        _txq->prio -= PRIO_STEP_UP;
+                        _txq->set_worker_priority(_txq->prio);
+                    }
+                }
             }
 
             // Kick any pending work

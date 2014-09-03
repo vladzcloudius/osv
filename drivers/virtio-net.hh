@@ -333,20 +333,20 @@ private:
     {
         // If packets_64 didn't change - decrease the priority
         if (q.prio < MAX_PRIO) {
-            if (q.cur_low_watermark_count == wakeup_stats.packets_64) {
+            if (q.cur_low_watermark_count == wakeup_stats.packets_8) {
                 q.prio += PRIO_STEP_DOWN;
                 thr.set_priority(q.prio);
             } else {
-                q.cur_low_watermark_count = wakeup_stats.packets_64;
+                q.cur_low_watermark_count = wakeup_stats.packets_8;
             }
         }
 
         // If packets_128 changed - increase the priority
         if ((q.prio > MIN_PRIO + PRIO_STEP_UP) &&
-            (q.cur_high_watermark_count < wakeup_stats.packets_128)) {
+            (q.cur_high_watermark_count < wakeup_stats.packets_64)) {
             q.prio -= PRIO_STEP_UP;
             thr.set_priority(q.prio);
-            q.cur_high_watermark_count = wakeup_stats.packets_128;
+            q.cur_high_watermark_count = wakeup_stats.packets_64;
         }
     }
 
@@ -356,8 +356,8 @@ private:
         rxq(vring* vq, std::function<void ()> poll_func)
             : vqueue(vq), poll_task(poll_func, sched::thread::attr().
                                     name("virtio-net-rx")),
-              cur_high_watermark_count(stats.rx_wakeup_stats.packets_128),
-              cur_low_watermark_count(stats.rx_wakeup_stats.packets_64),
+              cur_high_watermark_count(stats.rx_wakeup_stats.packets_64),
+              cur_low_watermark_count(stats.rx_wakeup_stats.packets_8),
               prio(poll_task.priority()) {};
 
         vring* vqueue;
@@ -390,8 +390,8 @@ private:
                 // TODO: implement a proper StopPred when we fix a SP code
                 _xmitter.poll_until([] { return false; }, _xmit_it);
             }, sched::thread::attr().name("virtio-tx-worker")),
-            cur_high_watermark_count(stats.tx_wakeup_stats.packets_128),
-            cur_low_watermark_count(stats.tx_wakeup_stats.packets_64),
+            cur_high_watermark_count(stats.tx_wakeup_stats.packets_64),
+            cur_low_watermark_count(stats.tx_wakeup_stats.packets_8),
             prio(worker.priority())
         {
             //

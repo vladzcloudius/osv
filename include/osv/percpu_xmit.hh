@@ -20,6 +20,7 @@
 
 #define PRIO_STEP_DOWN      0.000001
 #define PRIO_STEP_UP        0.01
+#define PRIO_STEP_UP_SMALL  0.0001
 #define MAX_PRIO            1.0 // Maybe not?
 #define MIN_PRIO            0.000000001
 
@@ -343,8 +344,8 @@ public:
                 _txq->kick_pending_with_thresh();
                 if (++pkt_cnt >= 64) {
                     pkt_cnt = 0;
-                    if (_txq->prio > MIN_PRIO + PRIO_STEP_UP) {
-                        _txq->prio -= PRIO_STEP_UP;
+                    if (_txq->prio > MIN_PRIO + PRIO_STEP_UP_SMALL) {
+                        _txq->prio -= PRIO_STEP_UP_SMALL;
                         _txq->set_worker_priority(_txq->prio);
                     }
                 }

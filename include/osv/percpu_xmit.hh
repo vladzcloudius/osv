@@ -20,7 +20,6 @@
 
 #define PRIO_STEP_DOWN      0.000001
 #define PRIO_STEP_UP        0.01
-#define PRIO_STEP_UP_SMALL  0.0001
 #define MAX_PRIO            1.0 // Maybe not?
 #define MIN_PRIO            0.000000001
 
@@ -273,8 +272,8 @@ public:
     void poll_until(StopPollingPred stop_pred, XmitIterator& xmit_it) {
         // Create a collection of a per-CPU queues
         std::list<cpu_queue_type*> all_cpuqs;
-        u64 cur_worker_packets = 0;
-        int pkt_cnt = 0;
+        u64 pkt_cnt = 0;
+        const size_t tx_ring_size = _txq->size();
 
         for (auto c : sched::cpus) {
             all_cpuqs.push_back(_cpuq.for_cpu(c)->get());
@@ -324,30 +323,32 @@ public:
                     // We are going to sleep - release the HW channel
                     unlock_running();
 
-                    pkt_cnt = 0;
-
                     sched::thread::wait_until([this] { return has_pending(); });
 
                     lock_running();
 
                     _txq->stats.tx_worker_wakeups++;
-                    cur_worker_packets = _txq->stats.tx_worker_packets -
-                                                             cur_worker_packets;
-                    _txq->update_wakeup_stats(cur_worker_packets);
-                    cur_worker_packets = _txq->stats.tx_worker_packets;
+                    _txq->update_wakeup_stats(pkt_cnt);
+                    pkt_cnt = 0;
                 }
             }
 
-            pkt_cnt++;
 
             while (_mg.pop(xmit_it)) {
                 _txq->kick_pending_with_thresh();
-                if (++pkt_cnt >= 64) {
+
+                //
+                // Update the "wakeup stats" when we handled the whole ring of
+                // packets.
+                // This is needed in order to update the worker priority when it
+                // doesn't goes to sleep because another thread(s) always
+                // creates it a new work to handle. In this case we want to
+                // increase a worker priority to cause it handle the accumulated
+                // work faster and allow falling back to the "fast hook" flow.
+                //
+                if (++pkt_cnt >= tx_ring_size) {
+                    _txq->update_wakeup_stats(pkt_cnt);
                     pkt_cnt = 0;
-                    if (_txq->prio > MIN_PRIO + PRIO_STEP_UP_SMALL) {
-                        _txq->prio -= PRIO_STEP_UP_SMALL;
-                        _txq->set_worker_priority(_txq->prio);
-                    }
                 }
             }
 

@@ -323,36 +323,40 @@ private:
 
     // TODO: Maybe rename the threads fields? This will save the thr parameter
     template<class Q>
-    static void update_thread_prio(Q& q, sched::thread &thr,
-                                   const wakeup_stats& wakeup_stats)
+    static void update_thread_prio(Q& q, const wakeup_stats& wakeup_stats,
+                                   u64 wakeup_stats::* low_wm,
+                                   u64 wakeup_stats::* high_wm)
     {
         // If packets_64 didn't change - decrease the priority
         if (q.prio < MAX_PRIO) {
-            if (q.cur_low_watermark_count == wakeup_stats.packets_8) {
+            if (q.cur_low_watermark_count == wakeup_stats.*low_wm) {
                 q.prio += PRIO_STEP_DOWN;
-                thr.set_priority(q.prio);
+                q.set_worker_priority(q.prio);
             } else {
-                q.cur_low_watermark_count = wakeup_stats.packets_8;
+                q.cur_low_watermark_count = wakeup_stats.*low_wm;
             }
         }
 
         // If packets_128 changed - increase the priority
         if ((q.prio > MIN_PRIO + PRIO_STEP_UP) &&
-            (q.cur_high_watermark_count < wakeup_stats.packets_64)) {
+            (q.cur_high_watermark_count < wakeup_stats.*high_wm)) {
             q.prio -= PRIO_STEP_UP;
-            thr.set_priority(q.prio);
-            q.cur_high_watermark_count = wakeup_stats.packets_64;
+            q.set_worker_priority(q.prio);
+            q.cur_high_watermark_count = wakeup_stats.*high_wm;
         }
     }
 
 
      /* Single Rx queue object */
     struct rxq {
+        static constexpr auto low_prio_wtmk  = &wakeup_stats::packets_64;
+        static constexpr auto high_prio_wtmk = &wakeup_stats::packets_256;
+
         rxq(vring* vq, std::function<void ()> poll_func)
             : vqueue(vq), poll_task(poll_func, sched::thread::attr().
                                     name("virtio-net-rx")),
-              cur_high_watermark_count(stats.rx_wakeup_stats.packets_64),
-              cur_low_watermark_count(stats.rx_wakeup_stats.packets_8),
+              cur_high_watermark_count(stats.rx_wakeup_stats.*high_prio_wtmk),
+              cur_low_watermark_count(stats.rx_wakeup_stats.*low_prio_wtmk),
               prio(poll_task.priority()) {};
 
         vring* vqueue;
@@ -365,8 +369,11 @@ private:
 
         void update_wakeup_stats(const u64 wakeup_packets) {
             net::update_wakeup_stats(stats.rx_wakeup_stats, wakeup_packets);
-            net::update_thread_prio(*this, poll_task, stats.rx_wakeup_stats);
+            net::update_thread_prio(*this, stats.rx_wakeup_stats,
+                                    low_prio_wtmk, high_prio_wtmk);
         }
+
+        void set_worker_priority(float prio) { poll_task.set_priority(prio); }
     };
 
     /**
@@ -378,6 +385,9 @@ private:
     struct txq {
         friend osv::xmitter_functor<txq>;
 
+        static constexpr auto low_prio_wtmk  = &wakeup_stats::packets_8;
+        static constexpr auto high_prio_wtmk = &wakeup_stats::packets_64;
+
         txq(net* parent, vring* vq) :
             vqueue(vq), _parent(parent), _xmit_it(this),
             _kick_thresh(vqueue->size()), _xmitter(this),
@@ -385,8 +395,8 @@ private:
                 // TODO: implement a proper StopPred when we fix a SP code
                 _xmitter.poll_until([] { return false; }, _xmit_it);
             }, sched::thread::attr().name("virtio-tx-worker")),
-            cur_high_watermark_count(stats.tx_wakeup_stats.packets_64),
-            cur_low_watermark_count(stats.tx_wakeup_stats.packets_8),
+            cur_high_watermark_count(stats.tx_wakeup_stats.*high_prio_wtmk),
+            cur_low_watermark_count(stats.tx_wakeup_stats.*low_prio_wtmk),
             prio(worker.priority())
         {
             //
@@ -451,10 +461,12 @@ private:
 
         void update_wakeup_stats(const u64 wakeup_packets) {
             net::update_wakeup_stats(stats.tx_wakeup_stats, wakeup_packets);
-            net::update_thread_prio(*this, worker, stats.tx_wakeup_stats);
+            net::update_thread_prio(*this, stats.tx_wakeup_stats,
+                                    low_prio_wtmk, high_prio_wtmk);
         }
 
         void set_worker_priority(float prio) { worker.set_priority(prio); }
+        size_t size() const { return vqueue->size(); }
 
         /* TODO: drain the per-cpu rings in ~txq() and in if_qflush() */
 

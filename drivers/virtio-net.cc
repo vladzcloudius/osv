@@ -208,6 +208,7 @@ void net::fill_qstats(const struct rxq& rxq, struct if_data* out_data) const
     printf("rx_bh_packets_64 %ld\n", wakeup_stats->packets_64);
     printf("rx_bh_packets_128 %ld\n", wakeup_stats->packets_128);
     printf("rx_bh_packets_256 %ld\n", wakeup_stats->packets_256);
+    printf("rx prio: %f\n", rxq.prio);
 }
 
 void net::fill_qstats(const struct txq& txq, struct if_data* out_data) const
@@ -230,6 +231,7 @@ void net::fill_qstats(const struct txq& txq, struct if_data* out_data) const
     printf("tx_worker_packets_64 %ld\n", wakeup_stats->packets_64);
     printf("tx_worker_packets_128 %ld\n", wakeup_stats->packets_128);
     printf("tx_worker_packets_256 %ld\n", wakeup_stats->packets_256);
+    printf("tx prio: %f\n", txq.prio);
 }
 
 bool net::ack_irq()

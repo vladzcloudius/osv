@@ -321,17 +321,56 @@ private:
         stats.packets_256 += !!(wakeup_packets & ~255UL);
     }
 
+#define PRIO_STEP_DOWN  0.000001
+#define PRIO_STEP_UP    0.01
+#define MAX_PRIO        1.0 // Maybe not?
+#define MIN_PRIO        0.000000001
+
+    // TODO: Maybe rename the threads fields? This will save the thr parameter
+    template<class Q>
+    static void update_thread_prio(Q& q, sched::thread &thr,
+                                   const wakeup_stats& wakeup_stats)
+    {
+        // If packets_64 didn't change - decrease the priority
+        if (q.prio < MAX_PRIO) {
+            if (q.cur_low_watermark_count == wakeup_stats.packets_64) {
+                q.prio += PRIO_STEP_DOWN;
+                thr.set_priority(q.prio);
+            } else {
+                q.cur_low_watermark_count = wakeup_stats.packets_64;
+            }
+        }
+
+        // If packets_128 changed - increase the priority
+        if ((q.prio > MIN_PRIO + PRIO_STEP_UP) &&
+            (q.cur_high_watermark_count < wakeup_stats.packets_128)) {
+            q.prio -= PRIO_STEP_UP;
+            thr.set_priority(q.prio);
+            q.cur_high_watermark_count = wakeup_stats.packets_128;
+        }
+    }
+
+
      /* Single Rx queue object */
     struct rxq {
         rxq(vring* vq, std::function<void ()> poll_func)
             : vqueue(vq), poll_task(poll_func, sched::thread::attr().
-                                    name("virtio-net-rx")) {};
+                                    name("virtio-net-rx")),
+              cur_high_watermark_count(stats.rx_wakeup_stats.packets_128),
+              cur_low_watermark_count(stats.rx_wakeup_stats.packets_64),
+              prio(poll_task.priority()) {};
+
         vring* vqueue;
         sched::thread  poll_task;
         struct rxq_stats stats = { 0 };
 
+        u64 cur_high_watermark_count;
+        u64 cur_low_watermark_count;
+        float prio;
+
         void update_wakeup_stats(const u64 wakeup_packets) {
             net::update_wakeup_stats(stats.rx_wakeup_stats, wakeup_packets);
+            net::update_thread_prio(*this, poll_task, stats.rx_wakeup_stats);
         }
     };
 
@@ -350,7 +389,10 @@ private:
             worker([this] {
                 // TODO: implement a proper StopPred when we fix a SP code
                 _xmitter.poll_until([] { return false; }, _xmit_it);
-            }, sched::thread::attr().name("virtio-tx-worker"))
+            }, sched::thread::attr().name("virtio-tx-worker")),
+            cur_high_watermark_count(stats.tx_wakeup_stats.packets_128),
+            cur_low_watermark_count(stats.tx_wakeup_stats.packets_64),
+            prio(worker.priority())
         {
             //
             // Kick at least every full ring of packets (see _kick_thresh
@@ -414,13 +456,13 @@ private:
 
         void update_wakeup_stats(const u64 wakeup_packets) {
             net::update_wakeup_stats(stats.tx_wakeup_stats, wakeup_packets);
+            net::update_thread_prio(*this, worker, stats.tx_wakeup_stats);
         }
 
         /* TODO: drain the per-cpu rings in ~txq() and in if_qflush() */
 
         vring* vqueue;
         txq_stats stats = { 0 };
-
     private:
         /**
          * This is a private version of try_xmit_one_locked() that acually does
@@ -481,6 +523,9 @@ private:
 
     public:
         sched::thread worker;
+        u64 cur_high_watermark_count;
+        u64 cur_low_watermark_count;
+        float prio;
     };
 
     /**

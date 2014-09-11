@@ -485,7 +485,11 @@ void cpu::load_balance()
         if (runqueue.empty()) {
             continue;
         }
-        auto min = *std::min_element(cpus.begin(), cpus.end(),
+        auto end_it_minus_2 = cpus.end();
+        for (int i = 0; end_it_minus_2 != cpus.begin() && i < 2; i++) {
+            --end_it_minus_2;
+        }
+        auto min = *std::min_element(cpus.begin(), end_it_minus_2,
                 [](cpu* c1, cpu* c2) { return c1->load() < c2->load(); });
         if (min == this) {
             continue;

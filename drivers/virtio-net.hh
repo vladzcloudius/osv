@@ -303,7 +303,8 @@ private:
     struct rxq {
         rxq(vring* vq, std::function<void ()> poll_func)
             : vqueue(vq), poll_task(poll_func, sched::thread::attr().
-                                    name("virtio-net-rx")) {};
+                                    name("virtio-net-rx").
+                pin(sched::cpus[(2*sched::cpus.size()-2) % sched::cpus.size()])) {};
         vring* vqueue;
         sched::thread  poll_task;
         struct rxq_stats stats = { 0 };
@@ -328,7 +329,8 @@ private:
             worker([this] {
                 // TODO: implement a proper StopPred when we fix a SP code
                 _xmitter.poll_until([] { return false; }, _xmit_it);
-            }, sched::thread::attr().name("virtio-tx-worker"))
+            }, sched::thread::attr().name("virtio-tx-worker").
+            pin(sched::cpus[(2*sched::cpus.size()-1) % sched::cpus.size()]))
         {
             //
             // Kick at least every full ring of packets (see _kick_thresh

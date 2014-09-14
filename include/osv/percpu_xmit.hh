@@ -202,6 +202,7 @@ public:
                 new sched::thread([this] { poll_until(); },
                                sched::thread::attr().pin(c).
                                name(worker_name_base + std::to_string(c->id))));
+            printf("Created %s\n", (worker_name_base + std::to_string(c->id)).c_str());
         }
 
         // Push them all into the heap

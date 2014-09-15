@@ -328,7 +328,7 @@ private:
             _xmitter(this,
                      // TODO: implement a proper StopPred when we fix a SP code
                      [] { return false; },
-                     _xmit_it)
+                     _xmit_it, "virtio-tx")
         {
             //
             // Kick at least every full ring of packets (see _kick_thresh

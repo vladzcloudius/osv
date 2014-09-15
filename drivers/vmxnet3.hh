@@ -156,7 +156,7 @@ class vmxnet3_txqueue : public vmxnet3_txq_shared {
 public:
     explicit vmxnet3_txqueue()
     : _xmit_it(this)
-    , _xmitter(this, [] { return false; }, _xmit_it)
+    , _xmitter(this, [] { return false; }, _xmit_it, "vmxnet3-tx")
     {}
 
     void init(struct ifnet* ifn, pci::bar *bar0);

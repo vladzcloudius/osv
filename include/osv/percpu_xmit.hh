@@ -190,10 +190,11 @@ template <class NetDevTxq, unsigned CpuTxqSize,
 class xmitter {
 public:
     explicit xmitter(NetDevTxq* txq,
-                     StopPollingPred pred, XmitIterator& xmit_it) :
+                     StopPollingPred pred, XmitIterator& xmit_it,
+                     const std::string& name) :
         _txq(txq), _stop_polling_pred(pred), _xmit_it(xmit_it),
         _check_empty_queues(false) {
-        std::string worker_name_base("tx-worker-");
+        std::string worker_name_base(name + "-");
         for (auto c : sched::cpus) {
             _cpuq.for_cpu(c)->reset(new cpu_queue_type);
             _all_cpuqs.push_back(_cpuq.for_cpu(c)->get());

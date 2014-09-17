@@ -357,7 +357,7 @@ void vmxnet3::dump_config(void)
 
 void vmxnet3::allocate_interrupts()
 {
-    _msi.easy_register({
+    _msi.easy_register<sched::thread>({
         { 0, [] {}, nullptr },
         { 1, [] {}, &_rxq[0].task }
     });

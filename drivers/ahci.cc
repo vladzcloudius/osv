@@ -441,7 +441,7 @@ void hba::enable_irq()
     hba_writel(HOST_GHC, ghc);
 
     if (_pci_dev.is_msix() || _pci_dev.is_msi() ) {
-        _msi.easy_register({ { 0, [=] { ack_irq(); }, nullptr} });
+        _msi.easy_register<sched::thread>({ { 0, [=] { ack_irq(); }, nullptr} });
     } else {
         _gsi.set_ack_and_handler(_pci_dev.get_interrupt_line(), [=] { return ack_irq(); }, [] {});
     }

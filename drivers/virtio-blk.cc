@@ -129,7 +129,8 @@ blk::blk(pci::device& pci_dev)
     t->start();
     auto queue = get_virt_queue(0);
     if (pci_dev.is_msix()) {
-        _msi.easy_register({ { 0, [=] { queue->disable_interrupts(); }, t } });
+        _msi.easy_register<sched::thread>({
+            { 0, [=] { queue->disable_interrupts(); }, t } });
     } else {
         _gsi.set_ack_and_handler(pci_dev.get_interrupt_line(), [=] { return this->ack_irq(); }, [=] { t->wake(); });
     }

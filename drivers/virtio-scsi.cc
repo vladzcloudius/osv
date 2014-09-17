@@ -158,7 +158,7 @@ scsi::scsi(pci::device& dev)
     auto queue = get_virt_queue(VIRTIO_SCSI_QUEUE_REQ);
 
     if (dev.is_msix()) {
-        _msi.easy_register({
+        _msi.easy_register<sched::thread>({
                 { VIRTIO_SCSI_QUEUE_CTRL, nullptr, nullptr },
                 { VIRTIO_SCSI_QUEUE_EVT, nullptr, nullptr },
                 { VIRTIO_SCSI_QUEUE_REQ, [=] { queue->disable_interrupts(); }, t },

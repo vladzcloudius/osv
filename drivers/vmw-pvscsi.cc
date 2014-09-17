@@ -235,7 +235,7 @@ pvscsi::pvscsi(pci::device& pci_dev)
             sched::thread::attr().name("vmw-pvscsi"));
     t->start();
     if (pci_dev.is_msix() || pci_dev.is_msi()) {
-        _msi.easy_register({ { 0, [] { }, t }, });
+        _msi.easy_register<sched::thread>({ { 0, [] { }, t }, });
     } else {
         abort("vmw-pvscsi msix is not present\n");
     }

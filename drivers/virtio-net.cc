@@ -284,7 +284,7 @@ net::net(pci::device& dev)
     ether_ifattach(_ifn, _config.mac);
 
     if (dev.is_msix()) {
-        _msi.easy_register({
+        _msi.easy_register<sched::thread>({
             { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
             { 1, [&] { _txq.vqueue->disable_interrupts(); }, nullptr }
         });

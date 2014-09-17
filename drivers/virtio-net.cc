@@ -25,6 +25,7 @@
 #include <osv/sched.hh>
 #include <osv/trace.hh>
 #include <osv/net_trace.hh>
+#include <osv/migration-lock.hh>
 
 #include <osv/device.h>
 #include <osv/ioctl.h>
@@ -416,92 +417,94 @@ void net::receiver()
         virtio_driver::wait_for_queue(vq, &vring::used_ring_not_empty);
         trace_virtio_net_rx_wake();
 
-        _rxq.stats.rx_bh_wakeups++;
-        _rxq.update_wakeup_stats(rx_packets);
+        WITH_LOCK(migration_lock) {
+            _rxq.stats.rx_bh_wakeups++;
+            _rxq.update_wakeup_stats(rx_packets);
 
-        u32 len;
-        int nbufs;
-        rx_drops = rx_packets = csum_ok = 0;
-        csum_err = rx_bytes = 0;
+            u32 len;
+            int nbufs;
+            rx_drops = rx_packets = csum_ok = 0;
+            csum_err = rx_bytes = 0;
 
-        // use local header that we copy out of the mbuf since we're
-        // truncating it.
-        net_hdr_mrg_rxbuf* mhdr;
+            // use local header that we copy out of the mbuf since we're
+            // truncating it.
+            net_hdr_mrg_rxbuf* mhdr;
 
-        while (void* page = vq->get_buf_elem(&len)) {
+            while (void* page = vq->get_buf_elem(&len)) {
 
-            vq->get_buf_finalize();
-
-            if (vq->refill_ring_cond())
-                fill_rx_ring();
-
-            // Bad packet/buffer - discard and continue to the next one
-            if (len < _hdr_size + ETHER_HDR_LEN) {
-                rx_drops++;
-                memory::free_page(page);
-
-                continue;
-            }
-
-            mhdr = static_cast<net_hdr_mrg_rxbuf*>(page);
-
-            if (!_mergeable_bufs) {
-                nbufs = 1;
-            } else {
-                nbufs = mhdr->num_buffers;
-            }
-
-            packet.push_back({page + _hdr_size, len - _hdr_size});
-
-            // Read the fragments
-            while (--nbufs > 0) {
-                page = vq->get_buf_elem(&len);
-                if (!page) {
-                    rx_drops++;
-                    for (auto&& v : packet) {
-                        free_buffer(v);
-                    }
-                    break;
-                }
-                packet.push_back({page, len});
                 vq->get_buf_finalize();
+
+                if (vq->refill_ring_cond())
+                    fill_rx_ring();
+
+                // Bad packet/buffer - discard and continue to the next one
+                if (len < _hdr_size + ETHER_HDR_LEN) {
+                    rx_drops++;
+                    memory::free_page(page);
+
+                    continue;
+                }
+
+                mhdr = static_cast<net_hdr_mrg_rxbuf*>(page);
+
+                if (!_mergeable_bufs) {
+                    nbufs = 1;
+                } else {
+                    nbufs = mhdr->num_buffers;
+                }
+
+                packet.push_back({page + _hdr_size, len - _hdr_size});
+
+                // Read the fragments
+                while (--nbufs > 0) {
+                    page = vq->get_buf_elem(&len);
+                    if (!page) {
+                        rx_drops++;
+                        for (auto&& v : packet) {
+                            free_buffer(v);
+                        }
+                        break;
+                    }
+                    packet.push_back({page, len});
+                    vq->get_buf_finalize();
+                }
+
+                auto m_head = packet_to_mbuf(packet);
+                packet.clear();
+
+                if ((_ifn->if_capenable & IFCAP_RXCSUM) &&
+                    (mhdr->hdr.flags &
+                     net_hdr::VIRTIO_NET_HDR_F_NEEDS_CSUM)) {
+                    if (bad_rx_csum(m_head, &mhdr->hdr))
+                        csum_err++;
+                    else
+                        csum_ok++;
+
+                }
+
+                rx_packets++;
+                rx_bytes += m_head->M_dat.MH.MH_pkthdr.len;
+
+                bool fast_path = _ifn->if_classifier.post_packet(m_head);
+                if (!fast_path) {
+                    (*_ifn->if_input)(_ifn, m_head);
+                }
+
+                trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
+
+                // The interface may have been stopped while we were
+                // passing the packet up the network stack.
+                if ((_ifn->if_drv_flags & IFF_DRV_RUNNING) == 0)
+                    break;
             }
 
-            auto m_head = packet_to_mbuf(packet);
-            packet.clear();
-
-            if ((_ifn->if_capenable & IFCAP_RXCSUM) &&
-                (mhdr->hdr.flags &
-                 net_hdr::VIRTIO_NET_HDR_F_NEEDS_CSUM)) {
-                if (bad_rx_csum(m_head, &mhdr->hdr))
-                    csum_err++;
-                else
-                    csum_ok++;
-
-            }
-
-            rx_packets++;
-            rx_bytes += m_head->M_dat.MH.MH_pkthdr.len;
-
-            bool fast_path = _ifn->if_classifier.post_packet(m_head);
-            if (!fast_path) {
-                (*_ifn->if_input)(_ifn, m_head);
-            }
-
-            trace_virtio_net_rx_packet(_ifn->if_index, rx_bytes);
-
-            // The interface may have been stopped while we were
-            // passing the packet up the network stack.
-            if ((_ifn->if_drv_flags & IFF_DRV_RUNNING) == 0)
-                break;
-        }
-
-        // Update the stats
-        _rxq.stats.rx_drops      += rx_drops;
-        _rxq.stats.rx_packets    += rx_packets;
-        _rxq.stats.rx_csum       += csum_ok;
-        _rxq.stats.rx_csum_err   += csum_err;
-        _rxq.stats.rx_bytes      += rx_bytes;
+            // Update the stats
+            _rxq.stats.rx_drops      += rx_drops;
+            _rxq.stats.rx_packets    += rx_packets;
+            _rxq.stats.rx_csum       += csum_ok;
+            _rxq.stats.rx_csum_err   += csum_err;
+            _rxq.stats.rx_bytes      += rx_bytes;
+        } // migration_lock
     }
 }
 

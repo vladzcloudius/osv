@@ -301,12 +301,145 @@ private:
 
     /* Single Rx queue object */
     struct rxq {
+
+        static const int migration_thresh = 1000; //Fix me!
+
+        struct worker_info {
+            worker_info() : me(nullptr), next_cpu(nullptr) {}
+            ~worker_info() {
+                if (me) {
+                    delete me;
+                }
+            }
+
+            sched::thread *me;
+            sched::cpu    *next_cpu;
+            int count = migration_thresh;
+        };
+
+        class rx_bh {
+        public:
+            rx_bh(std::function<void ()> poll_func) :
+                _poll_func(poll_func) {
+                std::string worker_name_base("virtio-net-rx-");
+
+                for (auto c : sched::cpus) {
+                    _worker.for_cpu(c)->me =
+                        new sched::thread([this] { _poll_func(); },
+                               sched::thread::attr().pin(c).
+                               name(worker_name_base + std::to_string(c->id)));
+                }
+
+                /*
+                 * Initialize the "next cpu" pointers                              .
+                 * The worker of the last CPU points to the the first CPU          .
+                 */
+                worker_info *prev_cpu_worker =
+                    _worker.for_cpu(sched::cpus[sched::cpus.size() - 1]);
+                for (auto c : sched::cpus) {
+                    worker_info *cur_worker = _worker.for_cpu(c);
+
+                    prev_cpu_worker->next_cpu = c;
+                    prev_cpu_worker = cur_worker;
+                }
+            }
+
+            sched::cpu *get_cpu();
+#if 0
+            {
+                WITH_LOCK (migration_lock) {
+                    #if 0
+                    if (--(_worker->count) > 0) {
+                        return sched::cpu::current();
+                    } else {
+                        _worker->count = migration_thresh;
+                        return _worker->next_cpu;
+                    }
+                    #else
+                    if ((_worker->count) > 0) {
+                        printf("CPU[%d]: returning current CPU\n", sched::cpu::current()->id);
+                        return sched::cpu::current();
+                    } else {
+                        _worker->count = migration_thresh;
+                        printf("CPU[%d]: returning next CPU\n", sched::cpu::current()->id);
+                        return _worker->next_cpu;
+                    }
+                    #endif
+                }
+            }
+#endif
+            void wake() {
+                WITH_LOCK (migration_lock) {
+                    _worker->me->wake();
+                }
+            }
+
+            void wake_next() {
+                WITH_LOCK (migration_lock) {
+                    _worker->count = 0;
+                    _next_to_run = _worker->next_cpu;
+                    _worker.for_cpu(_next_to_run)->me->wake();
+                }
+            }
+
+            int next_cpu_id() {
+                WITH_LOCK (migration_lock) {
+                    return _worker->next_cpu->id;
+                }
+            }
+
+            void start() {
+                for (auto c : sched::cpus) {
+                    _worker.for_cpu(c)->me->start();
+                }
+            }
+
+            // RUNNING state controling functions
+            bool try_lock_running() {
+                return !_running.test_and_set(std::memory_order_acquire);
+            }
+
+            void lock_running() {
+                if (!try_lock_running()) {
+                    sched::thread::wait_until([this] {
+                        return try_lock_running();
+                    });
+
+                    if (_next_to_run == sched::cpu::current()) {
+                        _next_to_run = nullptr;
+                        reset_start_time();
+                    }
+                }
+            }
+            void unlock_running() {
+                _running.clear(std::memory_order_release);
+            }
+
+            osv::clock::uptime::time_point get_start_time() {
+                return _start;
+            }
+
+            void reset_start_time() {
+                _start = osv::clock::uptime::now();
+            }
+
+        private:
+            std::function<void ()> _poll_func;
+            dynamic_percpu<worker_info> _worker;
+            osv::clock::uptime::time_point _start = osv::clock::uptime::now();
+            sched::cpu *_next_to_run = nullptr;
+            std::atomic_flag            _running    CACHELINE_ALIGNED
+                                                           = ATOMIC_FLAG_INIT;
+        };
+
         rxq(vring* vq, std::function<void ()> poll_func)
-            : vqueue(vq), poll_task(poll_func, sched::thread::attr().
-                                    name("virtio-net-rx")) {};
+            : vqueue(vq), bh(poll_func) {
+
+        };
         vring* vqueue;
-        sched::thread  poll_task;
         struct rxq_stats stats = { 0 };
+        rx_bh bh;
+
 
         void update_wakeup_stats(const u64 wakeup_packets) {
             if_update_wakeup_stats(stats.rx_wakeup_stats, wakeup_packets);

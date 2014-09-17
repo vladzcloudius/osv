@@ -107,7 +107,7 @@ static inline void set_affinity_and_wake(
 {
     auto cpu = t->get_cpu();
 
-    if (cpu != current) {
+    if (cpu != sched::cpu::current()) {
 
         //
         // According to PCI spec chapter 6.8.3.5 the MSI-X table entry may be
@@ -118,7 +118,7 @@ static inline void set_affinity_and_wake(
 
         std::atomic_thread_fence(std::memory_order_seq_cst);
 
-        current = cpu;
+        //current = cpu;
         v->set_affinity(cpu->arch.apic_id);
 
         std::atomic_thread_fence(std::memory_order_seq_cst);

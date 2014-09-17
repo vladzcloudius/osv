@@ -50,6 +50,10 @@ TRACEPOINT(trace_virtio_net_tx_no_space_calling_gc, "if=%d", int);
 TRACEPOINT(trace_virtio_net_tx_packet_size, "vring %p vec_sz %d", void*, int);
 TRACEPOINT(trace_virtio_net_tx_xmit_one_failed_to_post, "vring %p vec_sz %d",
            void*, int);
+TRACEPOINT(trace_rx_before_locking,"CPU[%d]", int);
+TRACEPOINT(trace_rx_after_locking,"CPU[%d]", int);
+TRACEPOINT(trace_rx_waking,"CPU[%d]: Waking CPU[%d]", int, int);
+TRACEPOINT(trace_rx_get_cpu,"Returning CPU[%d]", int);
 
 using namespace memory;
 
@@ -228,8 +232,6 @@ net::net(pci::device& dev)
       _rxq(get_virt_queue(0), [this] { this->receiver(); }),
       _txq(this, get_virt_queue(1))
 {
-    sched::thread* poll_task = &_rxq.poll_task;
-
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
     _id = _instance++;
@@ -278,19 +280,19 @@ net::net(pci::device& dev)
     _ifn->if_capenable = _ifn->if_capabilities | IFCAP_HWSTATS;
 
     //Start the polling thread before attaching it to the Rx interrupt
-    poll_task->start();
+    _rxq.bh.start();
     _txq.start();
 
     ether_ifattach(_ifn, _config.mac);
 
     if (dev.is_msix()) {
-        _msi.easy_register<sched::thread>({
-            { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
+        _msi.easy_register<rxq::rx_bh>({
+            { 0, [&] { _rxq.vqueue->disable_interrupts(); }, &_rxq.bh },
             { 1, [&] { _txq.vqueue->disable_interrupts(); }, nullptr }
         });
     } else {
         _gsi.set_ack_and_handler(dev.get_interrupt_line(),
-            [=] { return this->ack_irq(); }, [=] { poll_task->wake(); });
+            [=] { return this->ack_irq(); }, [=] { _rxq.bh.wake(); });
     }
 
     fill_rx_ring();
@@ -403,21 +405,37 @@ bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
     return false;
 }
 
+#define RX_THRESH vq->size()
+
 void net::receiver()
 {
     vring* vq = _rxq.vqueue;
     std::vector<iovec> packet;
     u64 rx_drops = 0, rx_packets = 0, csum_ok = 0;
     u64 csum_err = 0, rx_bytes = 0;
+    int budget = RX_THRESH;
+    void* page;
+
+    _rxq.bh.lock_running();
 
     while (1) {
 
-        // Wait for rx queue (used elements)
-        virtio_driver::wait_for_queue(vq, &vring::used_ring_not_empty);
-        trace_virtio_net_rx_wake();
+        if (!vq->used_ring_not_empty()) {
+            _rxq.bh.unlock_running();
 
-        _rxq.stats.rx_bh_wakeups++;
-        _rxq.update_wakeup_stats(rx_packets);
+            // Wait for rx queue (used elements)
+            virtio_driver::wait_for_queue(vq, &vring::used_ring_not_empty);
+lock:
+            trace_rx_before_locking(sched::cpu::current()->id);
+            _rxq.bh.lock_running();
+            trace_rx_after_locking(sched::cpu::current()->id);
+            budget = RX_THRESH;
+
+            trace_virtio_net_rx_wake();
+
+            _rxq.stats.rx_bh_wakeups++;
+            _rxq.update_wakeup_stats(rx_packets);
+        }
 
         u32 len;
         int nbufs;
@@ -428,7 +446,8 @@ void net::receiver()
         // truncating it.
         net_hdr_mrg_rxbuf* mhdr;
 
-        while (void* page = vq->get_buf_elem(&len)) {
+        // Handle at most budget packets at a time
+        while ((--budget > 0) && (page = vq->get_buf_elem(&len))) {
 
             vq->get_buf_finalize();
 
@@ -502,8 +521,49 @@ void net::receiver()
         _rxq.stats.rx_csum       += csum_ok;
         _rxq.stats.rx_csum_err   += csum_err;
         _rxq.stats.rx_bytes      += rx_bytes;
+
+        // If there is more work to do - pass it to another CPU
+        if (budget <= 0) {
+            using namespace std::chrono;
+            auto now = osv::clock::uptime::now();
+            auto diff = now - _rxq.bh.get_start_time();
+            if (duration_cast<milliseconds>(diff) >= milliseconds(10)) {
+                trace_rx_waking(sched::cpu::current()->id,
+                                _rxq.bh.next_cpu_id());
+
+                _rxq.bh.unlock_running();
+                _rxq.bh.wake_next();
+                goto lock;
+            } else {
+                budget = RX_THRESH;
+            }
+        }
     }
 }
+
+inline sched::cpu* virtio::net::rxq::rx_bh::get_cpu() {
+    WITH_LOCK (migration_lock) {
+        #if 0
+        if (--(_worker->count) > 0) {
+            return sched::cpu::current();
+        } else {
+            _worker->count = migration_thresh;
+            return _worker->next_cpu;
+        }
+        #else
+        if (--(_worker->count) > 0) {
+            //printf("CPU[%d]: returning current CPU\n", sched::cpu::current()->id);
+            trace_rx_get_cpu(sched::cpu::current()->id);
+            return sched::cpu::current();
+        } else {
+            _worker->count = migration_thresh;
+            //printf("CPU[%d]: returning next CPU\n", sched::cpu::current()->id);
+            trace_rx_get_cpu(_worker->next_cpu->id);
+            return _worker->next_cpu;
+        }
+        #endif
+    }
+    }
 
 mbuf* net::packet_to_mbuf(const std::vector<iovec>& packet)
 {

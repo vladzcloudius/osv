@@ -230,7 +230,7 @@ public:
      * we have gathered by ourselvs (e.g. FP queue stats).
      * @param out_data output buffer
      */
-    void fill_stats(struct if_data* out_data) const;
+    void fill_stats(struct if_data* out_data)/* const*/;
 
     /**
      * Transmit a single frame.
@@ -392,6 +392,9 @@ private:
         void start() { _xmitter.start(); }
 
         int qsize() { return vqueue->size(); }
+        
+        // TODO: Delete me!
+        void print_workers_prio() { _xmitter.print_worker_prio(); }
 
         /* TODO: drain the per-cpu rings in ~txq() and in if_qflush() */
 
@@ -472,7 +475,7 @@ private:
      * @param txq Tx queue handle
      * @param out_data output buffer
      */
-    void fill_qstats(const struct txq& txq, struct if_data* out_data) const;
+    void fill_qstats(/*const*/ struct txq& txq, struct if_data* out_data) const;
 
     /* We currently support only a single Rx+Tx queue */
     struct rxq _rxq;

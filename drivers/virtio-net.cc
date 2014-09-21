@@ -179,7 +179,7 @@ static void if_getinfo(struct ifnet* ifp, struct if_data* out_data)
     vnet->fill_stats(out_data);
 }
 
-void net::fill_stats(struct if_data* out_data) const
+void net::fill_stats(struct if_data* out_data) /*const*/
 {
     // We currently support only a single Tx/Rx queue so no iteration so far
     fill_qstats(_rxq, out_data);
@@ -194,9 +194,12 @@ void net::fill_qstats(const struct rxq& rxq, struct if_data* out_data) const
     out_data->ifi_ierrors    += rxq.stats.rx_csum_err;
     out_data->ifi_ibh_wakeups = rxq.stats.rx_bh_wakeups;
     out_data->ifi_iwakeup_stats = rxq.stats.rx_wakeup_stats;
+    
+    // TODO: Delete me!
+    printf("RX prio*10000 %f\n", (rxq.poll_task.priority()*10000.0));
 }
 
-void net::fill_qstats(const struct txq& txq, struct if_data* out_data) const
+void net::fill_qstats(/*const*/ struct txq& txq, struct if_data* out_data) const
 {
     assert(!out_data->ifi_oerrors && !out_data->ifi_obytes && !out_data->ifi_opackets);
     out_data->ifi_opackets       += txq.stats.tx_packets;
@@ -208,6 +211,8 @@ void net::fill_qstats(const struct txq& txq, struct if_data* out_data) const
     out_data->ifi_okicks          = txq.stats.tx_kicks;
     out_data->ifi_oqueue_is_full  = txq.stats.tx_hw_queue_is_full;
     out_data->ifi_owakeup_stats   = txq.stats.tx_wakeup_stats;
+
+    txq.print_workers_prio();
 }
 
 bool net::ack_irq()
@@ -229,6 +234,8 @@ net::net(pci::device& dev)
       _txq(this, get_virt_queue(1))
 {
     sched::thread* poll_task = &_rxq.poll_task;
+
+    poll_task->set_priority(osv::low_latency::max_priority);
 
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
@@ -403,12 +410,14 @@ bool net::bad_rx_csum(struct mbuf* m, struct net_hdr* hdr)
     return false;
 }
 
+
 void net::receiver()
 {
     vring* vq = _rxq.vqueue;
     std::vector<iovec> packet;
     u64 rx_drops = 0, rx_packets = 0, csum_ok = 0;
     u64 csum_err = 0, rx_bytes = 0;
+    void* page = nullptr;
 
     while (1) {
 
@@ -428,7 +437,8 @@ void net::receiver()
         // truncating it.
         net_hdr_mrg_rxbuf* mhdr;
 
-        while (void* page = vq->get_buf_elem(&len)) {
+        while ((rx_packets < osv::low_latency::packets_thresh) &&
+               (page = vq->get_buf_elem(&len))) {
 
             vq->get_buf_finalize();
 
@@ -502,6 +512,8 @@ void net::receiver()
         _rxq.stats.rx_csum       += csum_ok;
         _rxq.stats.rx_csum_err   += csum_err;
         _rxq.stats.rx_bytes      += rx_bytes;
+
+        osv::low_latency::update_thread_prio(rx_packets);
     }
 }
 

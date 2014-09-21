@@ -7,7 +7,7 @@
 #include <osv/types.h>
 #include <osv/percpu.hh>
 #include <osv/wait_record.hh>
-#include <osv/percpu_xmit.hh>
+#include <osv/low_latency_threads.hh>
 
 #include <lockfree/ring.hh>
 #include <lockfree/queue-mpsc.hh>
@@ -18,6 +18,7 @@
 #include <bsd/sys/sys/mbuf.h>
 
 #include <boost/function_output_iterator.hpp>
+
 
 namespace osv {
 
@@ -217,6 +218,8 @@ public:
                 new sched::thread([this] { poll_until(); },
                                sched::thread::attr().pin(c).
                                name(worker_name_base + std::to_string(c->id)));
+
+            _worker.for_cpu(c)->me->set_priority(low_latency::max_priority);
         }
 
         /*
@@ -314,6 +317,18 @@ public:
 
         return 0;
     }
+    
+    // TODO: Delete me!
+    void print_worker_prio()
+    {
+        int i = 0;
+        for (auto c : sched::cpus) {
+            worker_info *cur_worker = _worker.for_cpu(c);
+            
+            printf("TX[%d] prio*10000 %d\n", i++,
+                   (u32)(cur_worker->me->priority()*10000.0));
+        }
+    }
 
 private:
     void wake_worker() {
@@ -343,8 +358,7 @@ private:
      */
     void poll_until() {
         u64 cur_worker_packets = 0;
-        const int qsize = _txq->qsize();
-        int budget = qsize;
+        int budget = low_latency::packets_thresh;
         auto start = osv::clock::uptime::now();
 
         //
@@ -392,7 +406,7 @@ private:
 lock:
                     lock_running();
                     start = osv::clock::uptime::now();
-                    budget = qsize;
+                    budget = low_latency::packets_thresh;
 
                     _txq->stats.tx_worker_wakeups++;
                     cur_worker_packets = _txq->stats.tx_worker_packets -
@@ -413,6 +427,9 @@ lock:
             // Kick any pending work
             _txq->kick_pending();
 
+            low_latency::update_thread_prio(low_latency::packets_thresh -
+                                            budget);
+
             if (budget <= 0) {
                 using namespace std::chrono;
                 auto now = osv::clock::uptime::now();
@@ -430,7 +447,7 @@ lock:
 
                     goto lock;
                 } else {
-                    budget = qsize;
+                    budget = low_latency::packets_thresh;
                 }
             }
         }

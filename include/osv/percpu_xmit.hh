@@ -209,6 +209,8 @@ public:
         _txq(txq), _stop_polling_pred(pred), _xmit_it(xmit_it),
         _check_empty_queues(false) {
 
+        using namespace low_latency;
+
         std::string worker_name_base(name + "-");
         for (auto c : sched::cpus) {
             _cpuq.for_cpu(c)->reset(new cpu_queue_type);
@@ -219,7 +221,7 @@ public:
                                sched::thread::attr().pin(c).
                                name(worker_name_base + std::to_string(c->id)));
 
-            _worker.for_cpu(c)->me->set_priority(low_latency::max_priority);
+            _worker.for_cpu(c)->me->set_priority(thread_info::max_priority);
         }
 
         /*
@@ -358,8 +360,11 @@ private:
      */
     void poll_until() {
         u64 cur_worker_packets = 0;
-        int budget = low_latency::packets_thresh;
+        const int qsize = _txq->qsize();
+        int budget = qsize;
+        osv::low_latency::thread_info t_info(static_cast<double>(qsize));
         auto start = osv::clock::uptime::now();
+
 
         //
         // Dispatcher holds the RUNNING lock all the time it doesn't sleep
@@ -406,7 +411,7 @@ private:
 lock:
                     lock_running();
                     start = osv::clock::uptime::now();
-                    budget = low_latency::packets_thresh;
+                    budget = qsize;
 
                     _txq->stats.tx_worker_wakeups++;
                     cur_worker_packets = _txq->stats.tx_worker_packets -
@@ -427,8 +432,7 @@ lock:
             // Kick any pending work
             _txq->kick_pending();
 
-            low_latency::update_thread_prio(low_latency::packets_thresh -
-                                            budget);
+            t_info.update_thread_prio(qsize - budget);
 
             if (budget <= 0) {
                 using namespace std::chrono;
@@ -447,7 +451,7 @@ lock:
 
                     goto lock;
                 } else {
-                    budget = low_latency::packets_thresh;
+                    budget = qsize;
                 }
             }
         }

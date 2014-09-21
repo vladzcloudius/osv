@@ -235,7 +235,7 @@ net::net(pci::device& dev)
 {
     sched::thread* poll_task = &_rxq.poll_task;
 
-    poll_task->set_priority(osv::low_latency::max_priority);
+    poll_task->set_priority(osv::low_latency::thread_info::max_priority);
 
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
@@ -418,6 +418,9 @@ void net::receiver()
     u64 rx_drops = 0, rx_packets = 0, csum_ok = 0;
     u64 csum_err = 0, rx_bytes = 0;
     void* page = nullptr;
+    const int check_point_thresh = 128;
+    osv::low_latency::thread_info
+        t_info(static_cast<double>(check_point_thresh));
 
     while (1) {
 
@@ -437,7 +440,7 @@ void net::receiver()
         // truncating it.
         net_hdr_mrg_rxbuf* mhdr;
 
-        while ((rx_packets < osv::low_latency::packets_thresh) &&
+        while ((rx_packets < check_point_thresh) &&
                (page = vq->get_buf_elem(&len))) {
 
             vq->get_buf_finalize();
@@ -513,7 +516,7 @@ void net::receiver()
         _rxq.stats.rx_csum_err   += csum_err;
         _rxq.stats.rx_bytes      += rx_bytes;
 
-        osv::low_latency::update_thread_prio(rx_packets);
+        t_info.update_thread_prio(rx_packets);
     }
 }
 

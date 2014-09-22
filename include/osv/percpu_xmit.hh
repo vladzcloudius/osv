@@ -7,7 +7,7 @@
 #include <osv/types.h>
 #include <osv/percpu.hh>
 #include <osv/wait_record.hh>
-#include <osv/percpu_xmit.hh>
+#include <osv/low_latency_threads.hh>
 
 #include <lockfree/ring.hh>
 #include <lockfree/queue-mpsc.hh>
@@ -18,6 +18,7 @@
 #include <bsd/sys/sys/mbuf.h>
 
 #include <boost/function_output_iterator.hpp>
+
 
 namespace osv {
 
@@ -208,6 +209,8 @@ public:
         _txq(txq), _stop_polling_pred(pred), _xmit_it(xmit_it),
         _check_empty_queues(false) {
 
+        using namespace low_latency;
+
         std::string worker_name_base(name + "-");
         for (auto c : sched::cpus) {
             _cpuq.for_cpu(c)->reset(new cpu_queue_type);
@@ -217,6 +220,8 @@ public:
                 new sched::thread([this] { poll_until(); },
                                sched::thread::attr().pin(c).
                                name(worker_name_base + std::to_string(c->id)));
+
+            _worker.for_cpu(c)->me->set_priority(thread_info::max_priority);
         }
 
         /*
@@ -314,6 +319,18 @@ public:
 
         return 0;
     }
+    
+    // TODO: Delete me!
+    void print_worker_prio()
+    {
+        int i = 0;
+        for (auto c : sched::cpus) {
+            worker_info *cur_worker = _worker.for_cpu(c);
+            
+            printf("TX[%d] prio*10000 %d\n", i++,
+                   (u32)(cur_worker->me->priority()*10000.0));
+        }
+    }
 
 private:
     void wake_worker() {
@@ -345,6 +362,7 @@ private:
         u64 cur_worker_packets = 0;
         const int qsize = _txq->qsize();
         int budget = qsize;
+        osv::low_latency::thread_info t_info(static_cast<double>(qsize));
         auto start = osv::clock::uptime::now();
         const bool smp = (sched::cpus.size() > 1);
 
@@ -415,6 +433,8 @@ lock:
 
             // Kick any pending work
             _txq->kick_pending();
+
+            t_info.update_thread_prio(qsize - budget);
 
             if (smp && budget <= 0) {
                 using namespace std::chrono;

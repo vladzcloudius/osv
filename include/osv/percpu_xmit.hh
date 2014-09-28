@@ -7,7 +7,7 @@
 #include <osv/types.h>
 #include <osv/percpu.hh>
 #include <osv/wait_record.hh>
-#include <osv/percpu_xmit.hh>
+#include <osv/dynamic_thread_priority.hh>
 
 #include <lockfree/ring.hh>
 #include <lockfree/queue-mpsc.hh>
@@ -208,6 +208,8 @@ public:
         _txq(txq), _stop_polling_pred(pred), _xmit_it(xmit_it),
         _check_empty_queues(false) {
 
+        using namespace algorithm;
+
         std::string worker_name_base(name + "-");
         for (auto c : sched::cpus) {
             _cpuq.for_cpu(c)->reset(new cpu_queue_type);
@@ -217,6 +219,9 @@ public:
                 new sched::thread([this] { poll_until(); },
                                sched::thread::attr().pin(c).
                                name(worker_name_base + std::to_string(c->id)));
+
+            _worker.for_cpu(c)->me->
+                           set_priority(dynamic_thread_priority::max_priority);
         }
 
         /*
@@ -345,6 +350,7 @@ private:
         u64 cur_worker_packets = 0;
         const int qsize = _txq->qsize();
         int budget = qsize;
+        algorithm::dynamic_thread_priority dyn_prio(static_cast<double>(qsize));
         auto start = osv::clock::uptime::now();
         const bool smp = (sched::cpus.size() > 1);
 
@@ -415,6 +421,8 @@ lock:
 
             // Kick any pending work
             _txq->kick_pending();
+
+            dyn_prio.update(qsize - budget);
 
             if (smp && budget <= 0) {
                 using namespace std::chrono;

@@ -309,6 +309,8 @@ class thread : private timer_base::client {
 private:
     struct detached_state;
 public:
+    static constexpr float infinite_prio = 0.00001;
+
     struct stack_info {
         stack_info();
         stack_info(void* begin, size_t size);

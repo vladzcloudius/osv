@@ -400,7 +400,6 @@ lock:
                     lock_running();
                     if (smp) {
                         start = osv::clock::uptime::now();
-                        budget = qsize;
                     }
 
                     _txq->stats.tx_worker_wakeups++;
@@ -415,7 +414,7 @@ lock:
                 --budget;
             }
 
-            while (_mg.pop(_xmit_it) && (!smp || --budget > 0)) {
+            while (_mg.pop(_xmit_it) && (--budget > 0)) {
                 _txq->kick_pending_with_thresh();
             }
 
@@ -439,11 +438,12 @@ lock:
                     //
                     _worker->next->wake();
 
-                    goto lock;
-                } else {
                     budget = qsize;
+                    goto lock;
                 }
             }
+
+            budget = qsize;
         }
 
         // TODO: Add some handshake like a bool variable here

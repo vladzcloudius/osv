@@ -229,7 +229,7 @@ net::net(pci::device& dev)
       _txq(this, get_virt_queue(1))
 {
     sched::thread* poll_task = &_rxq.poll_task;
-    
+
     using namespace osv::algorithm;
     poll_task->set_priority(dynamic_thread_priority::max_priority);
 
@@ -414,8 +414,8 @@ void net::receiver()
     u64 csum_err = 0, rx_bytes = 0;
     static const u16 refill_thresh = 16;
     void *page = nullptr;
-    const int check_point_thresh = 128;
     using namespace osv::algorithm;
+    const int check_point_thresh = dynamic_thread_priority::checkpoints_thresh;
     dynamic_thread_priority dyn_prio(static_cast<double>(check_point_thresh));
 
     while (1) {

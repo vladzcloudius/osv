@@ -199,6 +199,7 @@ private:
 
         sched::thread *me;
         sched::thread *next;
+        sched::thread *prev;
     };
 
 public:
@@ -230,6 +231,7 @@ public:
             worker_info *cur_worker = _worker.for_cpu(c);
 
             prev_cpu_worker->next = cur_worker->me;
+            cur_worker->prev = prev_cpu_worker->me;
             prev_cpu_worker = cur_worker;
         }
 
@@ -403,6 +405,9 @@ lock:
                                                              cur_worker_packets;
                     _txq->update_wakeup_stats(cur_worker_packets);
                     cur_worker_packets = _txq->stats.tx_worker_packets;
+
+                    _worker->prev->set_priority(sched::thread::infinite_prio);
+
                 } else {
                     --budget;
                 }
@@ -430,7 +435,9 @@ lock:
                     // workers in a round-robin way ensuring the equal load on
                     // CPUs.
                     //
+                    sched::thread::current()->set_priority(1);
                     _worker->next->wake();
+                    trace_waking_right(_worker->next->get_cpu()->id);
 
                     goto lock;
                 } else {

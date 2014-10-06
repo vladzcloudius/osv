@@ -8,6 +8,10 @@
 
 #include <sys/cdefs.h>
 
+#include <osv/trace.hh>
+
+TRACEPOINT(trace_waking_right, "Waking CPU[%d]", int);
+
 #include "drivers/virtio.hh"
 #include "drivers/virtio-net.hh"
 #include "drivers/pci-device.hh"
@@ -23,7 +27,6 @@
 #include <osv/debug.h>
 
 #include <osv/sched.hh>
-#include <osv/trace.hh>
 #include <osv/net_trace.hh>
 
 #include <osv/device.h>
@@ -50,6 +53,7 @@ TRACEPOINT(trace_virtio_net_tx_no_space_calling_gc, "if=%d", int);
 TRACEPOINT(trace_virtio_net_tx_packet_size, "vring %p vec_sz %d", void*, int);
 TRACEPOINT(trace_virtio_net_tx_xmit_one_failed_to_post, "vring %p vec_sz %d",
            void*, int);
+
 
 using namespace memory;
 

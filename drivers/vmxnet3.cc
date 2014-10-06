@@ -25,7 +25,10 @@
 
 
 #include <sys/cdefs.h>
+#include <osv/trace.hh>
 
+
+TRACEPOINT(trace_waking_right, "Waking CPU[%d]", int);
 #include "drivers/vmxnet3.hh"
 #include "drivers/pci-device.hh"
 #include <osv/interrupt.hh>
@@ -38,7 +41,7 @@
 #include <osv/debug.h>
 
 #include <osv/sched.hh>
-#include <osv/trace.hh>
+
 
 #include "drivers/clock.hh"
 #include "drivers/clockevent.hh"
@@ -57,6 +60,7 @@
 #include <bsd/sys/netinet/tcp.h>
 #include <bsd/x64/machine/atomic.h>
 #include <bsd/x64/machine/in_cksum.h>
+
 
 using namespace memory;
 

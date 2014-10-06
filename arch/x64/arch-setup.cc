@@ -215,6 +215,8 @@ void arch_init_premain()
     disable_pic();
 }
 
+TRACEPOINT(trace_waking_right, "Waking CPU[%d]", int);
+
 #include "drivers/driver.hh"
 #include "drivers/pvpanic.hh"
 #include "drivers/virtio.hh"

@@ -210,14 +210,16 @@ public:
         _check_empty_queues(false) {
 
         std::string worker_name_base(name + "-");
+
+        sched::thread *worker = new sched::thread([this] { poll_until(); },
+                               sched::thread::attr().
+                               name(worker_name_base + "x"));
+
         for (auto c : sched::cpus) {
             _cpuq.for_cpu(c)->reset(new cpu_queue_type);
             _all_cpuqs.push_back(_cpuq.for_cpu(c)->get());
 
-            _worker.for_cpu(c)->me =
-                new sched::thread([this] { poll_until(); },
-                               sched::thread::attr().pin(c).
-                               name(worker_name_base + std::to_string(c->id)));
+            _worker.for_cpu(c)->me = worker;
             _worker.for_cpu(c)->me->
                                 set_priority(sched::thread::priority_infinity);
         }

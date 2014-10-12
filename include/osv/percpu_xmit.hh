@@ -199,6 +199,7 @@ private:
 
         sched::thread *me;
         sched::thread *next;
+        sched::thread *prev;
     };
 
 public:
@@ -221,7 +222,7 @@ public:
                                name(worker_name_base + std::to_string(c->id)));
 
             _worker.for_cpu(c)->me->
-                           set_priority(dynamic_thread_priority::max_priority);
+                           set_priority(sched::thread::priority_infinity);
         }
 
         /*
@@ -234,6 +235,7 @@ public:
             worker_info *cur_worker = _worker.for_cpu(c);
 
             prev_cpu_worker->next = cur_worker->me;
+            cur_worker->prev = prev_cpu_worker->me;
             prev_cpu_worker = cur_worker;
         }
 
@@ -350,8 +352,8 @@ private:
         u64 cur_worker_packets = 0;
         const int qsize = _txq->qsize();
         int budget = qsize;
-        algorithm::dynamic_thread_priority dyn_prio(static_cast<double>(qsize));
-        auto start = osv::clock::uptime::now();
+        algorithm::dynamic_pinned_thread_priority
+            dyn_prio(10, 20);
         const bool smp = (sched::cpus.size() > 1);
 
         //
@@ -398,15 +400,14 @@ private:
                     sched::thread::wait_until([this] { return has_pending(); });
 lock:
                     lock_running();
-                    if (smp) {
-                        start = osv::clock::uptime::now();
-                    }
 
                     _txq->stats.tx_worker_wakeups++;
                     cur_worker_packets = _txq->stats.tx_worker_packets -
                                                              cur_worker_packets;
                     _txq->update_wakeup_stats(cur_worker_packets);
                     cur_worker_packets = _txq->stats.tx_worker_packets;
+                    _worker->prev->
+                                set_priority(sched::thread::priority_infinity);
                 } else {
                     --budget;
                 }
@@ -421,26 +422,30 @@ lock:
             // Kick any pending work
             _txq->kick_pending();
 
-            dyn_prio.update(qsize - budget);
+            auto update_state = dyn_prio.update(qsize - budget);
 
-            if (smp && budget <= 0) {
-                using namespace std::chrono;
-                auto now = osv::clock::uptime::now();
-                auto diff = now - start;
-                if (duration_cast<milliseconds>(diff) >= milliseconds(100)) {
-                    unlock_running();
+            if (smp &&
+                (update_state ==
+                        algorithm::dynamic_pinned_thread_priority::prio_down)) {
+                unlock_running();
 
-                    //
-                    // Wake the next worker. This way, if there is a situation
-                    // when worker doesn't let go, we will wake wake the per-CPU
-                    // workers in a round-robin way ensuring the equal load on
-                    // CPUs.
-                    //
-                    _worker->next->wake();
+                printf("CPU[%d]: -> CPU[%d]\n",
+                       sched::current_cpu->id, _worker->next->get_cpu()->id);
 
-                    budget = qsize;
-                    goto lock;
-                }
+                sched::thread::current()->
+                              set_priority(sched::thread::priority_default);
+
+                //
+                // Wake the next worker. This way, if there is a situation
+                // when worker doesn't let go, we will wake wake the per-CPU
+                // workers in a round-robin way ensuring the equal load on
+                // CPUs.
+                //
+                _worker->next->wake();
+                sched::thread::yield();
+
+                budget = qsize;
+                goto lock;
             }
 
             budget = qsize;

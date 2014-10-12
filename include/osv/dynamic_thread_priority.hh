@@ -4,41 +4,44 @@
 namespace osv {
 namespace algorithm {
 
+/*
+ * 1.1 is needed to ensure (0.1 * 10 <= min_priority) and thus thread's
+ * priority is able to reach 1.
+ */
+static constexpr float min_priority      = 1.1;
 
-class dynamic_thread_priority {
+static constexpr float prio_step_down    = 10;
+static constexpr float prio_step_up      = 10;
+static constexpr int time_thresh_ns      = 100000000; // 100ms
+static constexpr u64 work_thresh  = 10000;
+
+class dynamic_pinned_thread_priority {
 public:
-    /*
-     * This "strange" values are due to the "strange" priority value semantics
-     * in OSv: the higher priority value corresponds to a lower thread priority.
-     */
+    enum update_state {
+        prio_up,
+        prio_down,
+        prio_unchanged
+    };
 
-    /*
-     * 1.1 is needed to ensure (0.1 * 10 <= min_priority) and thus thread's
-     * priority is able to reach 1.
-     */
-    static constexpr float min_priority      = 1.1;
 
-    static constexpr float max_priority      = 0.001;
-    static constexpr float prio_step_down    = 10;
-    static constexpr float prio_step_up      = 10;
-    static constexpr int time_thresh_ms      = 100;
-    static constexpr u64 checkpoints_thresh  = 10000;
+    dynamic_pinned_thread_priority(u64 idle_low_thresh,
+                                   u64 idle_high_thresh):
+        _last_idle_clock(sched::current_cpu->idle_thread->thread_clock()),
+        _work(0),
+        _start(osv::clock::uptime::now()), _idle_low_thresh(idle_low_thresh),
+        _idle_high_thresh(idle_high_thresh) {}
 
-    dynamic_thread_priority(double work_thresh):
-        _work(0), _check_points(0), _check_point_test_count(0),
-        _work_thresh(work_thresh),_start(osv::clock::uptime::now()) {}
-
-    void update(u64 new_work) {
+    enum update_state update(int new_work) {
         using namespace std::chrono;
+        enum update_state rc = prio_unchanged;
 
-        _check_points++;
         _work += new_work;
 
         // Don't check time to often - that's quite expensive.
-        if (++_check_point_test_count < checkpoints_thresh) {
-            return;
+        if (_work < work_thresh) {
+            return rc;
         } else {
-            _check_point_test_count = 0;
+            _work = 0;
         }
 
         //
@@ -47,34 +50,54 @@ public:
         //
         auto now = osv::clock::uptime::now();
         auto diff = now - _start;
-        if (duration_cast<milliseconds>(diff) >= milliseconds(time_thresh_ms)) {
+        if (duration_cast<nanoseconds>(diff) >= nanoseconds(time_thresh_ns)) {
             sched::thread *current = sched::thread::current();
             float cur_prio = current->priority();
-            double average_work_rate =
-                static_cast<double>(_work) / _check_points;
 
-            if (average_work_rate >= _work_thresh) {
+            auto cur_idle_clock =
+                sched::current_cpu->idle_thread->thread_clock();
+            auto idle_time_since_start = cur_idle_clock - _last_idle_clock;
+
+            u64 average_idle_time =
+                100 * duration_cast<nanoseconds>(idle_time_since_start).count() /
+                duration_cast<nanoseconds>(diff).count();
+
+            // Decrease a priority if CPU idle time is too low
+            if (average_idle_time <= _idle_low_thresh) {
                 if (cur_prio * prio_step_down <= min_priority) {
                     cur_prio *= prio_step_down;
                     current->set_priority(cur_prio);
                 }
-            } else {
-                if (cur_prio / prio_step_up >= max_priority) {
+
+                rc = prio_down;
+
+            // Increase the priority if there is enough idle CPU
+            } else if (average_idle_time >= _idle_high_thresh) {
+                if (cur_prio / prio_step_up >=
+                                    sched::thread::priority_infinity) {
                     cur_prio /= prio_step_up;
                     current->set_priority(cur_prio);
                 }
+
+                rc = prio_up;
             }
 
-            _work = _check_points = 0;
+            printf("CPU[%d]: idle %d, cur_prio * 100000 %d\n",
+                   sched::current_cpu->id, average_idle_time,
+                   (u64)(cur_prio * 100000));
+
+            _last_idle_clock = cur_idle_clock;
             _start = osv::clock::uptime::now();
         }
+
+        return rc;
     }
 private:
+    sched::thread_runtime::duration _last_idle_clock;
     u64 _work;
-    u64 _check_points;
-    u64 _check_point_test_count;
-    double _work_thresh;
     osv::clock::uptime::time_point _start;
+    const u64 _idle_low_thresh;
+    const u64 _idle_high_thresh;
 };
 
 

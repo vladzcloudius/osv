@@ -231,7 +231,7 @@ net::net(pci::device& dev)
     sched::thread* poll_task = &_rxq.poll_task;
 
     using namespace osv::algorithm;
-    poll_task->set_priority(dynamic_thread_priority::max_priority);
+    poll_task->set_priority(sched::thread::priority_infinity);
 
     _driver_name = "virtio-net";
     virtio_i("VIRTIO NET INSTANCE");
@@ -415,8 +415,8 @@ void net::receiver()
     static const u16 refill_thresh = 16;
     void *page = nullptr;
     using namespace osv::algorithm;
-    const int check_point_thresh = dynamic_thread_priority::checkpoints_thresh;
-    dynamic_thread_priority dyn_prio(static_cast<double>(check_point_thresh));
+    const int packets_thresh = work_thresh;
+    //dynamic_thread_priority dyn_prio(static_cast<double>(check_point_thresh));
 
     while (1) {
 
@@ -436,7 +436,7 @@ void net::receiver()
         // truncating it.
         net_hdr_mrg_rxbuf* mhdr;
 
-        while ((rx_packets < check_point_thresh) &&
+        while ((rx_packets < packets_thresh) &&
                (page = vq->get_buf_elem(&len))) {
 
             vq->get_buf_finalize();
@@ -512,7 +512,9 @@ void net::receiver()
         _rxq.stats.rx_csum_err   += csum_err;
         _rxq.stats.rx_bytes      += rx_bytes;
 
-        dyn_prio.update(rx_packets);
+        // TODO: Implement a separate logic that takes into an account the
+        // global idle time
+        //dyn_prio.update(rx_packets);
     }
 }
 

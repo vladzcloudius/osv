@@ -282,6 +282,7 @@ public:
     // set runtime from another thread's runtime. The other thread must
     // be on the same CPU's runqueue.
     void set_local(thread_runtime &other) {
+        assert(0);
         _Rtt = other._Rtt;
         _renormalize_count = other._renormalize_count;
     }
@@ -743,7 +744,7 @@ struct cpu : private timer_base::client {
     void send_wakeup_ipi();
     void load_balance();
     unsigned load();
-    void reschedule_from_interrupt();
+    void reschedule_from_interrupt(bool called_from_yield = false);
     void enqueue(thread& t);
     void init_idle_thread();
     virtual void timer_fired() override;

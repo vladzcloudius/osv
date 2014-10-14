@@ -151,6 +151,20 @@ class PairTimedTraceMatcher(TimedTraceMatcher):
     def get_correlation_id(self, sample):
         return sample.thread.ptr
 
+class GlobalPairMatcher(TimedTraceMatcher):
+    def __init__(self, entry_trace_name, exit_trace_name):
+        self.entry_trace_name = entry_trace_name
+        self.exit_trace_name = exit_trace_name
+
+    def is_entry_or_exit(self, sample):
+        if sample.name == self.entry_trace_name:
+            return True
+        if sample.name == self.exit_trace_name:
+            return False
+
+    def get_correlation_id(self, sample):
+        return 0
+
 class TimedConventionMatcher(TimedTraceMatcher):
     def __init__(self):
         self.block_tracepoints = set()
@@ -190,6 +204,7 @@ class PerCpuConventionMatcher(TimedTraceMatcher):
 class timed_trace_producer(object):
     pair_matchers = [
         PairTimedTraceMatcher('mutex_lock_wait', 'mutex_lock_wake'),
+        GlobalPairMatcher('virtio_rx_int', 'virtio_net_rx_wake'),
     ]
 
     def __init__(self):
@@ -227,7 +242,8 @@ class timed_trace_producer(object):
                 if self.earliest_trace_per_cpu[sample.cpu] > old:
                     pass
                 else:
-                    raise Exception('Nested entry:\n%s\n%s\n' % (str(old), str(sample)))
+                    #raise Exception('Nested entry:\n%s\n%s\n' % (str(old), str(sample)))
+                    pass
             self.open_samples[id] = sample
         else:
             entry_trace = self.open_samples.pop(id, None)

@@ -47,6 +47,8 @@ TRACEPOINT(trace_virtio_net_tx_packet, "if=%d, len=%d", int, int);
 TRACEPOINT(trace_virtio_net_tx_failed_add_buf, "if=%d", int);
 TRACEPOINT(trace_virtio_net_tx_no_space_calling_gc, "if=%d", int);
 
+TRACEPOINT(trace_virtio_rx_int, "");
+
 TRACEPOINT(trace_virtio_net_tx_packet_size, "vring %p vec_sz %d", void*, int);
 TRACEPOINT(trace_virtio_net_tx_xmit_one_failed_to_post, "vring %p vec_sz %d",
            void*, int);
@@ -287,7 +289,7 @@ net::net(pci::device& dev)
 
     if (dev.is_msix()) {
         _msi.easy_register({
-            { 0, [&] { _rxq.vqueue->disable_interrupts(); }, poll_task },
+            { 0, [&] { _rxq.vqueue->disable_interrupts(); trace_virtio_rx_int(); }, poll_task },
             { 1, [&] { _txq.vqueue->disable_interrupts(); }, nullptr }
         });
     } else {

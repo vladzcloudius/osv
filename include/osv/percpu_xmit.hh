@@ -197,9 +197,19 @@ private:
             }
         }
 
+        void wake_next() {
+            my_prio = me->priority();
+            me->set_priority(sched::thread::priority_default);
+            next->wake();
+        }
+
+        void wake() { me->wake(); }
+        void restore_prev_prio() { prev->me->set_priority(prev->my_prio); }
+
         sched::thread *me;
-        sched::thread *next;
-        sched::thread *prev;
+        worker_info *next;
+        worker_info *prev;
+        float my_prio;
     };
 
 public:
@@ -234,8 +244,8 @@ public:
         for (auto c : sched::cpus) {
             worker_info *cur_worker = _worker.for_cpu(c);
 
-            prev_cpu_worker->next = cur_worker->me;
-            cur_worker->prev = prev_cpu_worker->me;
+            prev_cpu_worker->next = cur_worker;
+            cur_worker->prev = prev_cpu_worker;
             prev_cpu_worker = cur_worker;
         }
 
@@ -326,7 +336,7 @@ private:
     void wake_worker() {
         WITH_LOCK(migration_lock)
         {
-            _worker->me->wake();
+            _worker->wake();
         }
     }
 
@@ -406,8 +416,10 @@ lock:
                                                              cur_worker_packets;
                     _txq->update_wakeup_stats(cur_worker_packets);
                     cur_worker_packets = _txq->stats.tx_worker_packets;
-                    _worker->prev->
-                                set_priority(sched::thread::priority_infinity);
+
+                    if (smp) {
+                        _worker->restore_prev_prio();
+                    }
                 } else {
                     --budget;
                 }
@@ -425,15 +437,11 @@ lock:
             auto update_state = dyn_prio.update(qsize - budget);
 
             if (smp &&
-                (update_state ==
-                        algorithm::dynamic_pinned_thread_priority::prio_down)) {
+                (update_state == algorithm::prio_down)) {
                 unlock_running();
 
                 printf("CPU[%d]: -> CPU[%d]\n",
-                       sched::current_cpu->id, _worker->next->get_cpu()->id);
-
-                sched::thread::current()->
-                              set_priority(sched::thread::priority_default);
+                       sched::current_cpu->id, _worker->next->me->get_cpu()->id);
 
                 //
                 // Wake the next worker. This way, if there is a situation
@@ -441,8 +449,7 @@ lock:
                 // workers in a round-robin way ensuring the equal load on
                 // CPUs.
                 //
-                _worker->next->wake();
-                sched::thread::yield();
+                _worker->wake_next();
 
                 budget = qsize;
                 goto lock;

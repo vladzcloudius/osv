@@ -13,15 +13,16 @@ static constexpr float min_priority      = 1.1;
 static constexpr float prio_step_down    = 10;
 static constexpr float prio_step_up      = 10;
 static constexpr int time_thresh_ns      = 100000000; // 100ms
-static constexpr u64 work_thresh  = 10000;
+static constexpr u64 work_thresh         = 10000;
+
+enum update_state {
+    prio_up,
+    prio_down,
+    prio_unchanged
+};
 
 class dynamic_pinned_thread_priority {
 public:
-    enum update_state {
-        prio_up,
-        prio_down,
-        prio_unchanged
-    };
 
 
     dynamic_pinned_thread_priority(u64 idle_low_thresh,

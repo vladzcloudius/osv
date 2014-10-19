@@ -13,7 +13,6 @@
 #include <lockfree/queue-mpsc.hh>
 
 #include <osv/clock.hh>
-#include <osv/migration-lock.hh>
 
 #include <bsd/sys/sys/mbuf.h>
 
@@ -188,20 +187,6 @@ private:
 template <class NetDevTxq, unsigned CpuTxqSize,
           class StopPollingPred, class XmitIterator>
 class xmitter {
-private:
-    struct worker_info {
-        worker_info() : me(NULL), next(NULL) {}
-        ~worker_info() {
-            if (me) {
-                delete me;
-            }
-        }
-
-        sched::thread *me;
-        sched::thread *next;
-        sched::thread *prev;
-    };
-
 public:
     explicit xmitter(NetDevTxq* txq,
                      StopPollingPred pred, XmitIterator& xmit_it,
@@ -209,32 +194,14 @@ public:
         _txq(txq), _stop_polling_pred(pred), _xmit_it(xmit_it),
         _check_empty_queues(false) {
 
-        std::string worker_name_base(name + "-");
         for (auto c : sched::cpus) {
             _cpuq.for_cpu(c)->reset(new cpu_queue_type);
             _all_cpuqs.push_back(_cpuq.for_cpu(c)->get());
-
-            _worker.for_cpu(c)->me =
-                new sched::thread([this] { poll_until(); },
-                               sched::thread::attr().pin(c).
-                               name(worker_name_base + std::to_string(c->id)));
-            _worker.for_cpu(c)->me->
-                                set_priority(sched::thread::priority_infinity);
         }
 
-        /*
-         * Initialize the "next worker thread" pointers.
-         * The worker of the last CPU points to the worker of the first CPU.
-         */
-        worker_info *prev_cpu_worker =
-            _worker.for_cpu(sched::cpus[sched::cpus.size() - 1]);
-        for (auto c : sched::cpus) {
-            worker_info *cur_worker = _worker.for_cpu(c);
-
-            prev_cpu_worker->next = cur_worker->me;
-            cur_worker->prev = prev_cpu_worker->me;
-            prev_cpu_worker = cur_worker;
-        }
+        _worker = new sched::thread([this] { poll_until(); },
+                               sched::thread::attr().name(name));
+        _worker->set_priority(sched::thread::priority_infinity);
 
         // Push them all into the heap
         _mg.create_heap(_all_cpuqs);
@@ -245,9 +212,7 @@ public:
      */
     void start()
     {
-        for (auto c : sched::cpus) {
-            _worker.for_cpu(c)->me->start();
-        }
+        _worker->start();
     }
 
     /**
@@ -319,12 +284,13 @@ public:
         return 0;
     }
 
+    sched::thread *worker_addr() {
+        return _worker;
+    }
+
 private:
     void wake_worker() {
-        WITH_LOCK(migration_lock)
-        {
-            _worker->me->wake();
-        }
+        _worker->wake();
     }
 
     /**
@@ -347,10 +313,6 @@ private:
      */
     void poll_until() {
         u64 cur_worker_packets = 0;
-        const int qsize = _txq->qsize();
-        int budget = qsize;
-        auto start = osv::clock::uptime::now();
-        const bool smp = (sched::cpus.size() > 1);
 
         //
         // Dispatcher holds the RUNNING lock all the time it doesn't sleep
@@ -394,58 +356,22 @@ private:
                     unlock_running();
 
                     sched::thread::wait_until([this] { return has_pending(); });
-lock:
                     lock_running();
-                    if (smp) {
-                        start = osv::clock::uptime::now();
-                        budget = qsize;
-                    }
 
                     _txq->stats.tx_worker_wakeups++;
                     cur_worker_packets = _txq->stats.tx_worker_packets -
                                                              cur_worker_packets;
                     _txq->update_wakeup_stats(cur_worker_packets);
                     cur_worker_packets = _txq->stats.tx_worker_packets;
-
-                    _worker->prev->
-                                set_priority(sched::thread::priority_infinity);
-
-                } else {
-                    --budget;
                 }
-            } else {
-                --budget;
             }
 
-            while (_mg.pop(_xmit_it) && (!smp || --budget > 0)) {
+            while (_mg.pop(_xmit_it)) {
                 _txq->kick_pending_with_thresh();
             }
 
             // Kick any pending work
             _txq->kick_pending();
-
-            if (smp && budget <= 0) {
-                using namespace std::chrono;
-                auto now = osv::clock::uptime::now();
-                auto diff = now - start;
-                if (duration_cast<milliseconds>(diff) >= milliseconds(100)) {
-                    unlock_running();
-
-                    //
-                    // Wake the next worker. This way, if there is a situation
-                    // when worker doesn't let go, we will wake wake the per-CPU
-                    // workers in a round-robin way ensuring the equal load on
-                    // CPUs.
-                    //
-                    sched::thread::current()->
-                                set_priority(sched::thread::priority_default);
-                    _worker->next->wake();
-
-                    goto lock;
-                } else {
-                    budget = qsize;
-                }
-            }
         }
 
         // TODO: Add some handshake like a bool variable here
@@ -576,7 +502,7 @@ private:
 
     // A collection of a per-CPU queues
     std::list<cpu_queue_type*> _all_cpuqs;
-    dynamic_percpu<worker_info>                     _worker;
+    sched::thread *_worker;
     dynamic_percpu<std::unique_ptr<cpu_queue_type>> _cpuq;
     osv::nway_merger<std::list<cpu_queue_type*>>      _mg    CACHELINE_ALIGNED;
     std::atomic<bool>                  _check_empty_queues    CACHELINE_ALIGNED;

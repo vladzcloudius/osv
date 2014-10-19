@@ -212,7 +212,6 @@ public:
 
     virtual u32 get_driver_features();
 
-    void wait_for_queue(vring* queue);
     bool bad_rx_csum(struct mbuf* m, struct net_hdr* hdr);
     void receiver();
     void fill_rx_ring();
@@ -390,6 +389,8 @@ private:
         }
 
         void start() { _xmitter.start(); }
+
+        sched::thread *worker_addr() { return _xmitter.worker_addr(); }
 
         int qsize() { return vqueue->size(); }
 

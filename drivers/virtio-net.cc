@@ -290,7 +290,7 @@ net::net(pci::device& dev)
     if (dev.is_msix()) {
         _msi.easy_register({
             { 0, [&] { _rxq.vqueue->disable_interrupts(); trace_virtio_rx_int(); }, poll_task },
-            { 1, [&] { _txq.vqueue->disable_interrupts(); }, nullptr }
+            { 1, [&] { _txq.vqueue->disable_interrupts(); }, _txq.worker_addr() }
         });
     } else {
         _gsi.set_ack_and_handler(dev.get_interrupt_line(),
@@ -686,11 +686,15 @@ void net::txq::xmit_one_locked(void* _req)
         // We are going to poll - flush the pending packets
         kick_pending();
         do {
+            #if 1
+            _parent->wait_for_queue(vqueue, &vring::used_ring_not_empty);
+            #else
             if (!vqueue->used_ring_not_empty()) {
                 do {
                     sched::thread::yield();
                 } while (!vqueue->used_ring_not_empty());
             }
+            #endif
             gc();
         } while (!vqueue->add_buf(req));
     }

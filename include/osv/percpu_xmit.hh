@@ -191,26 +191,38 @@ class xmitter {
 private:
     struct worker_info {
         worker_info() : me(NULL), next(NULL), prev(NULL),
-            my_prio(sched::thread::priority_default) {}
+            prio(sched::thread::priority_default), _migrating(false) {}
         ~worker_info() {
             if (me) {
                 delete me;
             }
         }
 
-        void wake_next() {
-            my_prio = me->priority();
-            me->set_priority(sched::thread::priority_default);
+        void migrate() {
+            if (!_migrating) {
+                prio = me->priority();
+                me->set_priority(sched::thread::priority_default);
+                _migrating = true;
+            }
             next->wake();
         }
 
+        bool migrating() const { return _migrating; }
+
         void wake() { me->wake(); }
-        void restore_prev_prio() { prev->me->set_priority(prev->my_prio); }
+        void restore_prev_prio() {
+            if (prev->_migrating) {
+                prev->me->set_priority(prev->prio); }
+                prev->_migrating = false;
+            }
 
         sched::thread *me;
         worker_info *next;
         worker_info *prev;
-        float my_prio;
+        float prio;
+
+    private:
+        bool _migrating;
     };
 
 public:
@@ -234,7 +246,7 @@ public:
 
             _worker.for_cpu(c)->me->
                            set_priority(sched::thread::priority_infinity);
-            _worker.for_cpu(c)->my_prio = sched::thread::priority_infinity;
+            _worker.for_cpu(c)->prio = sched::thread::priority_infinity;
         }
 
         /*
@@ -436,25 +448,35 @@ lock:
             // Kick any pending work
             _txq->kick_pending();
 
-            auto update_state = dyn_prio.update(qsize - budget);
+            if (smp) {
+                if (!_worker->migrating()) {
+                    auto update_state = dyn_prio.update(qsize - budget);
 
-            if (smp &&
-                (update_state == algorithm::prio_down)) {
-                unlock_running();
+                    if (update_state == algorithm::prio_down) {
+                        unlock_running();
 
-                printf("CPU[%d]: -> CPU[%d]\n",
-                       sched::current_cpu->id, _worker->next->me->get_cpu()->id);
+                        // TODO: Delete me!!!
+                        printf("CPU[%d]: -> CPU[%d]\n",
+                               sched::current_cpu->id,
+                               _worker->next->me->get_cpu()->id);
 
-                //
-                // Wake the next worker. This way, if there is a situation
-                // when worker doesn't let go, we will wake wake the per-CPU
-                // workers in a round-robin way ensuring the equal load on
-                // CPUs.
-                //
-                _worker->wake_next();
+                        //
+                        // Wake the next worker. This way, if there is a situation
+                        // when worker doesn't let go, we will wake wake the per-CPU
+                        // workers in a round-robin way ensuring the equal load on
+                        // CPUs.
+                        //
+                        _worker->migrate();
 
-                budget = qsize;
-                goto lock;
+                        budget = qsize;
+                        goto lock;
+                    }
+                } else {
+                    unlock_running();
+                    _worker->migrate();
+                    budget = qsize;
+                    goto lock;
+                }
             }
 
             budget = qsize;

@@ -190,7 +190,8 @@ template <class NetDevTxq, unsigned CpuTxqSize,
 class xmitter {
 private:
     struct worker_info {
-        worker_info() : me(NULL), next(NULL) {}
+        worker_info() : me(NULL), next(NULL), prev(NULL),
+            my_prio(sched::thread::priority_default) {}
         ~worker_info() {
             if (me) {
                 delete me;
@@ -233,6 +234,7 @@ public:
 
             _worker.for_cpu(c)->me->
                            set_priority(sched::thread::priority_infinity);
+            _worker.for_cpu(c)->my_prio = sched::thread::priority_infinity;
         }
 
         /*

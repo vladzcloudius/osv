@@ -416,7 +416,7 @@ void net::receiver()
     void *page = nullptr;
     using namespace osv::algorithm;
     const int packets_thresh = work_thresh;
-    //dynamic_thread_priority dyn_prio(static_cast<double>(check_point_thresh));
+    dynamic_thread_priority dyn_prio(5, 10);
 
     while (1) {
 
@@ -512,9 +512,7 @@ void net::receiver()
         _rxq.stats.rx_csum_err   += csum_err;
         _rxq.stats.rx_bytes      += rx_bytes;
 
-        // TODO: Implement a separate logic that takes into an account the
-        // global idle time
-        //dyn_prio.update(rx_packets);
+        dyn_prio.update(rx_packets);
     }
 }
 

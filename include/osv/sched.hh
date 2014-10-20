@@ -279,13 +279,6 @@ public:
         return _priority;
     }
 
-    // set runtime from another thread's runtime. The other thread must
-    // be on the same CPU's runqueue.
-    void set_local(thread_runtime &other) {
-        _Rtt = other._Rtt;
-        _renormalize_count = other._renormalize_count;
-    }
-
     // When _Rtt=0, multiplicative normalization doesn't matter, so it doesn't
     // matter what we set for _renormalize_count. We can't set it properly
     // in the constructor (it doesn't run from the scheduler, or know which
@@ -421,7 +414,8 @@ public:
     inline void wake_with_from_mutex(Action action);
     template <class Rep, class Period>
     static void sleep(std::chrono::duration<Rep, Period> duration);
-    static void yield();
+    static void yield(std::chrono::nanoseconds preempt_after =
+                                               std::chrono::nanoseconds(10000));
     static void exit() __attribute__((__noreturn__));
 #ifdef __OSV_CORE__
     static inline thread* current() { return s_current; };
@@ -742,7 +736,9 @@ struct cpu : private timer_base::client {
     void send_wakeup_ipi();
     void load_balance();
     unsigned load();
-    void reschedule_from_interrupt();
+    void reschedule_from_interrupt(bool called_from_yield = false,
+                                   std::chrono::nanoseconds preempt_after =
+                                            std::chrono::nanoseconds(10000));
     void enqueue(thread& t);
     void init_idle_thread();
     virtual void timer_fired() override;

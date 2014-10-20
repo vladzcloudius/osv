@@ -91,8 +91,9 @@ public:
                 rc = prio_up;
             }
 
-            printf("CPU[%d]: idle %d, cur_prio * 100000 %d\n",
-                   sched::current_cpu->id, average_idle_time,
+            printf("CPU[%d]: %s: idle %d, cur_prio * 100000 %d\n",
+                   sched::current_cpu->id, current->name().c_str(),
+                   average_idle_time,
                    (u64)(cur_prio * 100000));
 
             _last_idle_clock = cur_idle_clock;

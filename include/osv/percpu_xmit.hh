@@ -13,7 +13,6 @@
 #include <lockfree/queue-mpsc.hh>
 
 #include <osv/clock.hh>
-#include <osv/migration-lock.hh>
 
 #include <bsd/sys/sys/mbuf.h>
 
@@ -188,43 +187,6 @@ private:
 template <class NetDevTxq, unsigned CpuTxqSize,
           class StopPollingPred, class XmitIterator>
 class xmitter {
-private:
-    struct worker_info {
-        worker_info() : me(NULL), next(NULL), prev(NULL),
-            prio(sched::thread::priority_default), _migrating(false) {}
-        ~worker_info() {
-            if (me) {
-                delete me;
-            }
-        }
-
-        void migrate() {
-            if (!_migrating) {
-                prio = me->priority();
-                me->set_priority(sched::thread::priority_default);
-                _migrating = true;
-            }
-            next->wake();
-        }
-
-        bool migrating() const { return _migrating; }
-
-        void wake() { me->wake(); }
-        void restore_prev_prio() {
-            if (prev->_migrating) {
-                prev->me->set_priority(prev->prio); }
-                prev->_migrating = false;
-            }
-
-        sched::thread *me;
-        worker_info *next;
-        worker_info *prev;
-        float prio;
-
-    private:
-        bool _migrating;
-    };
-
 public:
     explicit xmitter(NetDevTxq* txq,
                      StopPollingPred pred, XmitIterator& xmit_it,
@@ -234,48 +196,26 @@ public:
 
         using namespace algorithm;
 
-        std::string worker_name_base(name + "-");
         for (auto c : sched::cpus) {
             _cpuq.for_cpu(c)->reset(new cpu_queue_type);
             _all_cpuqs.push_back(_cpuq.for_cpu(c)->get());
 
-            _worker.for_cpu(c)->me =
-                new sched::thread([this] { poll_until(); },
-                               sched::thread::attr().pin(c).
-                               name(worker_name_base + std::to_string(c->id)));
 
-            _worker.for_cpu(c)->me->
-                           set_priority(sched::thread::priority_infinity);
-            _worker.for_cpu(c)->prio = sched::thread::priority_infinity;
         }
 
-        /*
-         * Initialize the "next worker thread" pointers.
-         * The worker of the last CPU points to the worker of the first CPU.
-         */
-        worker_info *prev_cpu_worker =
-            _worker.for_cpu(sched::cpus[sched::cpus.size() - 1]);
-        for (auto c : sched::cpus) {
-            worker_info *cur_worker = _worker.for_cpu(c);
-
-            prev_cpu_worker->next = cur_worker;
-            cur_worker->prev = prev_cpu_worker;
-            prev_cpu_worker = cur_worker;
-        }
+        _worker = new sched::thread([this] { poll_until(); },
+                                    sched::thread::attr().name(name));
+        _worker->set_priority(sched::thread::priority_infinity);
 
         // Push them all into the heap
         _mg.create_heap(_all_cpuqs);
     }
 
     /**
-     * Start all CPU-workers
+     * Start a worker
+     *
      */
-    void start()
-    {
-        for (auto c : sched::cpus) {
-            _worker.for_cpu(c)->me->start();
-        }
-    }
+    void start() { _worker->start(); }
 
     /**
      * A main transmit function: will try to bypass the per-CPU queue if
@@ -347,12 +287,7 @@ public:
     }
 
 private:
-    void wake_worker() {
-        WITH_LOCK(migration_lock)
-        {
-            _worker->wake();
-        }
-    }
+    void wake_worker() { _worker->wake(); }
 
     /**
      * poll_until - main function of a per-CPU Tx worker thread
@@ -376,9 +311,7 @@ private:
         u64 cur_worker_packets = 0;
         const int qsize = _txq->qsize();
         int budget = qsize;
-        algorithm::dynamic_pinned_thread_priority
-            dyn_prio(10, 20);
-        const bool smp = (sched::cpus.size() > 1);
+        algorithm::dynamic_thread_priority dyn_prio(10, 20);
 
         //
         // Dispatcher holds the RUNNING lock all the time it doesn't sleep
@@ -422,7 +355,7 @@ private:
                     unlock_running();
 
                     sched::thread::wait_until([this] { return has_pending(); });
-lock:
+
                     lock_running();
 
                     _txq->stats.tx_worker_wakeups++;
@@ -431,15 +364,19 @@ lock:
                     _txq->update_wakeup_stats(cur_worker_packets);
                     cur_worker_packets = _txq->stats.tx_worker_packets;
 
-                    if (smp) {
-                        _worker->restore_prev_prio();
-                    }
-                } else {
-                    --budget;
+                    //
+                    // If we've got here then we haven't handled any packet yet.
+                    // Increment the "budget" here in order to compensate the
+                    // decrement outside this block.
+                    //
+                    // This way we simplify the logic and save two "else"
+                    // blocks.
+                    //
+                    ++budget;
                 }
-            } else {
-                --budget;
             }
+
+            --budget;
 
             while (_mg.pop(_xmit_it) && (--budget > 0)) {
                 _txq->kick_pending_with_thresh();
@@ -448,36 +385,7 @@ lock:
             // Kick any pending work
             _txq->kick_pending();
 
-            if (smp) {
-                if (!_worker->migrating()) {
-                    auto update_state = dyn_prio.update(qsize - budget);
-
-                    if (update_state == algorithm::prio_down) {
-                        unlock_running();
-
-                        // TODO: Delete me!!!
-                        printf("CPU[%d]: -> CPU[%d]\n",
-                               sched::current_cpu->id,
-                               _worker->next->me->get_cpu()->id);
-
-                        //
-                        // Wake the next worker. This way, if there is a situation
-                        // when worker doesn't let go, we will wake wake the per-CPU
-                        // workers in a round-robin way ensuring the equal load on
-                        // CPUs.
-                        //
-                        _worker->migrate();
-
-                        budget = qsize;
-                        goto lock;
-                    }
-                } else {
-                    unlock_running();
-                    _worker->migrate();
-                    budget = qsize;
-                    goto lock;
-                }
-            }
+            dyn_prio.update(qsize - budget);
 
             budget = qsize;
         }
@@ -610,7 +518,7 @@ private:
 
     // A collection of a per-CPU queues
     std::list<cpu_queue_type*> _all_cpuqs;
-    dynamic_percpu<worker_info>                     _worker;
+    sched::thread *_worker;
     dynamic_percpu<std::unique_ptr<cpu_queue_type>> _cpuq;
     osv::nway_merger<std::list<cpu_queue_type*>>      _mg    CACHELINE_ALIGNED;
     std::atomic<bool>                  _check_empty_queues    CACHELINE_ALIGNED;

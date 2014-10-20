@@ -21,16 +21,25 @@ enum update_state {
     prio_unchanged
 };
 
-class dynamic_pinned_thread_priority {
+class dynamic_thread_priority {
 public:
 
 
-    dynamic_pinned_thread_priority(u64 idle_low_thresh,
+    dynamic_thread_priority(u64 idle_low_thresh,
                                    u64 idle_high_thresh):
-        _last_idle_clock(sched::current_cpu->idle_thread->thread_clock()),
+        _last_idle_clock(get_system_idle_time()),
         _work(0),
         _start(osv::clock::uptime::now()), _idle_low_thresh(idle_low_thresh),
         _idle_high_thresh(idle_high_thresh) {}
+
+    sched::thread_runtime::duration get_system_idle_time() {
+        sched::thread_runtime::duration idle_time(0);
+        for (auto c : sched::cpus) {
+            idle_time += c->idle_thread->thread_clock();
+        }
+
+        return idle_time;
+    }
 
     enum update_state update(int new_work) {
         using namespace std::chrono;
@@ -55,8 +64,7 @@ public:
             sched::thread *current = sched::thread::current();
             float cur_prio = current->priority();
 
-            auto cur_idle_clock =
-                sched::current_cpu->idle_thread->thread_clock();
+            auto cur_idle_clock = get_system_idle_time();
             auto idle_time_since_start = cur_idle_clock - _last_idle_clock;
 
             u64 average_idle_time =

@@ -311,7 +311,7 @@ private:
         u64 cur_worker_packets = 0;
         const int qsize = _txq->qsize();
         int budget = qsize;
-        algorithm::dynamic_thread_priority dyn_prio(10, 20);
+        algorithm::dynamic_thread_priority dyn_prio(5, 10);
 
         //
         // Dispatcher holds the RUNNING lock all the time it doesn't sleep

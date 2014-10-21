@@ -257,7 +257,8 @@ void cpu::schedule()
     }
 }
 
-void cpu::reschedule_from_interrupt()
+void cpu::reschedule_from_interrupt(bool called_from_yield,
+                                    std::chrono::nanoseconds preempt_after)
 {
     trace_sched_sched();
     assert(sched::exception_depth <= 1);
@@ -286,8 +287,9 @@ void cpu::reschedule_from_interrupt()
         // lowest runtime, and update the timer until the next thread's turn.
         if (runqueue.empty()) {
             preemption_timer.cancel();
+            assert(!called_from_yield);
             return;
-        } else {
+        } else if (!called_from_yield) {
             auto &t = *runqueue.begin();
             if (p->_runtime.get_local() < t._runtime.get_local()) {
                 preemption_timer.cancel();
@@ -302,7 +304,11 @@ void cpu::reschedule_from_interrupt()
         // p, return the runtime it borrowed for hysteresis.
         p->_runtime.hysteresis_run_stop();
         p->_detached_state->st.store(thread::status::queued);
-        enqueue(*p);
+
+        if (!called_from_yield) {
+            enqueue(*p);
+        }
+
         trace_sched_preempt();
         p->stat_preemptions.incr();
     } else {
@@ -317,6 +323,11 @@ void cpu::reschedule_from_interrupt()
     n->cputime_estimator_set(now, n->_total_cpu_time);
     assert(n->_detached_state->st.load() == thread::status::queued);
     trace_sched_switch(n, p->_runtime.get_local(), n->_runtime.get_local());
+
+    if (called_from_yield) {
+        enqueue(*p);
+    }
+
     if (n == idle_thread) {
         trace_sched_idle();
     } else if (p == idle_thread) {
@@ -341,6 +352,8 @@ void cpu::reschedule_from_interrupt()
         auto delta = n->_runtime.time_until(t._runtime.get_local());
         if (delta > 0) {
             preemption_timer.set(now + delta);
+        } else if (called_from_yield) {
+            preemption_timer.set(now + preempt_after);
         }
     }
 
@@ -594,7 +607,7 @@ void cpu::notifier::fire()
     }
 }
 
-void thread::yield()
+void thread::yield(std::chrono::nanoseconds preempt_after)
 {
     trace_sched_yield();
     auto t = current();
@@ -612,10 +625,10 @@ void thread::yield()
         return;
     }
     trace_sched_yield_switch();
-    t->_runtime.set_local(tnext._runtime);
+
     // Note that reschedule_from_interrupt will further increase t->_runtime
     // by thyst, giving the other thread 2*thyst to run before going back to t
-    t->_detached_state->_cpu->reschedule_from_interrupt();
+    t->_detached_state->_cpu->reschedule_from_interrupt(true, preempt_after);
 }
 
 void thread::set_priority(float priority)

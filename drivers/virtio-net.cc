@@ -678,6 +678,7 @@ inline void net::txq::update_stats(net_req* req)
 void net::txq::xmit_one_locked(void* _req)
 {
     net_req* req = static_cast<net_req*>(_req);
+    using namespace osv::clock::literals;
 
     if (try_xmit_one_locked(req)) {
 
@@ -686,7 +687,13 @@ void net::txq::xmit_one_locked(void* _req)
         do {
             if (!vqueue->used_ring_not_empty()) {
                 do {
-                    sched::thread::yield();
+                    //
+                    // The standard default configuration for Tx coalescing
+                    // timeout in NICs is about 50us. Wait for twice this time
+                    // to ensure that there is at least one Tx interrupt while
+                    // we are not running.
+                    //
+                    sched::thread::yield(100_us);
                 } while (!vqueue->used_ring_not_empty());
             }
             gc();

@@ -347,16 +347,14 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
         n->_runtime.add_context_switch_penalty();
     }
     preemption_timer.cancel();
-    if (!called_from_yield) {
-        if (!runqueue.empty()) {
-            auto& t = *runqueue.begin();
-            auto delta = n->_runtime.time_until(t._runtime.get_local());
-            if (delta > 0) {
-                preemption_timer.set(now + delta);
-            }
+    if (!runqueue.empty()) {
+        auto& t = *runqueue.begin();
+        auto delta = n->_runtime.time_until(t._runtime.get_local());
+        if (delta > 0) {
+            preemption_timer.set(now + delta);
+        } else if (called_from_yield) {
+            preemption_timer.set(now + preempt_after);
         }
-    } else {
-        preemption_timer.set(now + preempt_after);
     }
 
     if (app_thread.load(std::memory_order_relaxed) != n->_app) { // don't write into a cache line if it can be avoided
